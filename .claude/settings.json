@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(python3 -c ' *)",
+      "Bash(python -c ' *)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import scipy; print\\(scipy.__version__\\); from scipy.signal import butter; sos = butter\\(4, 10, btype='low', fs=100, output='sos'\\); print\\(sos\\)\")",
+      "Bash(where python *)",
+      "Bash(D:/miniConda/envs/imu/python.exe -c ' *)",
+      "Bash(pio run *)",
+      "WebFetch(domain:learn.adafruit.com)",
+      "WebFetch(domain:www.adafruit.com)",
+      "WebFetch(domain:registry.platformio.org)",
+      "Read(//c/Users/shakt/Downloads/**)",
+      "Bash(rm e:/IMUBalanceBoard/dashboard/public/index.html)",
+      "Bash(rm -rf e:/IMUBalanceBoard/dashboard/src e:/IMUBalanceBoard/dashboard/dist e:/IMUBalanceBoard/dashboard/tsconfig.json e:/IMUBalanceBoard/dashboard/package.json e:/IMUBalanceBoard/dashboard/pnpm-lock.yaml)"
+    ]
+  }
+}
