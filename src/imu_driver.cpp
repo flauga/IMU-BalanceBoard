@@ -3,138 +3,97 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-void IMUDriver::hardReset() {
-    digitalWrite(PIN_BNO_RST, LOW);
-    delay(IMU_RESET_PULSE_MS);
-    digitalWrite(PIN_BNO_RST, HIGH);
-    delay(IMU_RESET_WAIT_MS);
-}
-
 bool IMUDriver::begin() {
-    pinMode(PIN_BNO_INT, INPUT_PULLUP);
-    pinMode(PIN_BNO_RST, OUTPUT);
-
-    // Reset the ESP32 I2C peripheral first — on ESP32 reboot without power-cycle
-    // the I2C hardware may be in a stale state that confuses the BNO085.
-    Wire.end();
-    delay(50);
     Wire.begin();
-    Wire.setClock(100000);
-
-    // Now assert BNO085 hardware reset
-    digitalWrite(PIN_BNO_RST, LOW);
-    delay(100);
-    digitalWrite(PIN_BNO_RST, HIGH);
-    delay(IMU_RESET_WAIT_MS);
+    Wire.setClock(400000);
 
     for (uint8_t attempt = 0; attempt < IMU_INIT_MAX_RETRIES; attempt++) {
-        if (bno_.begin_I2C()) {
-            Wire.setClock(100000);
-            Serial.println("[IMU] BNO085 connected — triggering clean reset for report config");
-            // Trigger a hardware reset NOW via the library. This puts the sensor
-            // into the same state as the working "spontaneous reset" path.
-            // checkReset() will see wasReset()=true on the next loop() call
-            // and invoke enableReports() from the proven-working code path.
-            bno_.hardwareReset();
+        if (imu_.begin(LSM6DSO_I2C_ADDR, Wire)) {
+            // initialize() calls setIncrement() then applies settings to hardware
+            imu_.initialize(BASIC_SETTINGS);   // calls setIncrement(), baseline settings
+            // Override to 208 Hz and ±4g — higher ODR feeds Mahony more often,
+            // reducing angle noise and improving step response.
+            imu_.setAccelRange(4);
+            imu_.setAccelDataRate(208);
+            imu_.setGyroDataRate(208);
+
             last_data_ms_ = millis();
+            Serial.println("[IMU] LSM6DSO connected at 208 Hz");
             return true;
         }
         Serial.printf("[IMU] Init attempt %d/%d failed\n", attempt + 1, IMU_INIT_MAX_RETRIES);
         Wire.end();
         delay(50);
         Wire.begin();
-        Wire.setClock(100000);
-        digitalWrite(PIN_BNO_RST, LOW);
-        delay(100);
-        digitalWrite(PIN_BNO_RST, HIGH);
+        Wire.setClock(400000);
         delay(IMU_INIT_RETRY_DELAY_MS);
     }
 
-    Serial.println("[IMU] ERROR: BNO085 init failed after all retries");
+    Serial.println("[IMU] ERROR: LSM6DSO init failed after all retries");
     return false;
 }
 
-void IMUDriver::enableReports() {
-    if (!bno_.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_REPORT_INTERVAL_US)) {
-        Serial.println("[IMU] WARNING: Failed to enable Game Rotation Vector");
-    }
-    if (!bno_.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_REPORT_INTERVAL_US)) {
-        Serial.println("[IMU] WARNING: Failed to enable Calibrated Gyroscope");
-    }
-}
-
 bool IMUDriver::update() {
-    if (!bno_.getSensorEvent(&sensor_value_)) {
-        return false;
-    }
+    // Gate on data-ready flag (STATUS_REG bit0=XLDA, bit1=GDA)
+    uint8_t status = imu_.listenDataReady();
+    if (!(status & 0x01)) return false;  // accel not ready yet
 
+    constexpr float G          = 9.80665f;
+    constexpr float DPS_TO_RAD = 3.14159265f / 180.0f;
+
+    ax_ = imu_.readFloatAccelX() * G;
+    ay_ = imu_.readFloatAccelY() * G;
+    az_ = imu_.readFloatAccelZ() * G;
+    gx_ = imu_.readFloatGyroX() * DPS_TO_RAD - gx_bias_;
+    gy_ = imu_.readFloatGyroY() * DPS_TO_RAD - gy_bias_;
+    gz_ = imu_.readFloatGyroZ() * DPS_TO_RAD - gz_bias_;
+
+    new_data_     = true;
     last_data_ms_ = millis();
-
-    switch (sensor_value_.sensorId) {
-        case SH2_GAME_ROTATION_VECTOR:
-            last_quat_[0] = sensor_value_.un.gameRotationVector.real;
-            last_quat_[1] = sensor_value_.un.gameRotationVector.i;
-            last_quat_[2] = sensor_value_.un.gameRotationVector.j;
-            last_quat_[3] = sensor_value_.un.gameRotationVector.k;
-            new_quat_ = true;
-            break;
-
-        case SH2_GYROSCOPE_CALIBRATED:
-            last_gyro_[0] = sensor_value_.un.gyroscope.x;
-            last_gyro_[1] = sensor_value_.un.gyroscope.y;
-            last_gyro_[2] = sensor_value_.un.gyroscope.z;
-            new_gyro_ = true;
-            break;
-
-        default:
-            break;
-    }
-
     return true;
 }
 
-void IMUDriver::checkReset() {
-    if (bno_.wasReset()) {
-        Serial.println("[IMU] BNO085 booted — configuring reports");
-        enableReports();
-        last_data_ms_ = millis();
-        return;
-    }
+bool IMUDriver::calibrateGyro(uint32_t duration_ms) {
+    constexpr float DPS_TO_RAD = 3.14159265f / 180.0f;
 
-    // Hard-reset watchdog: no data for IMU_NO_DATA_TIMEOUT_MS
-    if (last_data_ms_ > 0 && (millis() - last_data_ms_ > IMU_NO_DATA_TIMEOUT_MS)) {
-        Serial.println("[IMU] WARNING: No data — hard-resetting BNO085");
+    // Discard any stale gyro bias from a prior call so we average raw samples.
+    gx_bias_ = gy_bias_ = gz_bias_ = 0.0f;
 
-        // Must close SH2 session before re-opening; without this shtp_open()
-        // finds the singleton slot occupied, returns NULL, begin_I2C() returns
-        // false silently, and the next sh2_service() dereferences NULL → panic.
-        sh2_close();
-
-        pinMode(PIN_BNO_RST, OUTPUT);
-
-        bool ok = false;
-        for (uint8_t attempt = 0; attempt < IMU_INIT_MAX_RETRIES; attempt++) {
-            Wire.end();
-            delay(50);
-            Wire.begin();
-            Wire.setClock(100000);
-            digitalWrite(PIN_BNO_RST, LOW);
-            delay(100);
-            digitalWrite(PIN_BNO_RST, HIGH);
-            delay(IMU_RESET_WAIT_MS);
-            if (bno_.begin_I2C()) {
-                Wire.setClock(100000);
-                bno_.hardwareReset();  // let wasReset() path handle enableReports()
-                ok = true;
-                break;
-            }
-            Serial.printf("[IMU] Recovery attempt %d/%d failed\n",
-                          attempt + 1, IMU_INIT_MAX_RETRIES);
-            sh2_close();
-            delay(IMU_INIT_RETRY_DELAY_MS);
+    double sx = 0.0, sy = 0.0, sz = 0.0;
+    uint32_t n = 0;
+    uint32_t start = millis();
+    while (millis() - start < duration_ms) {
+        uint8_t status = imu_.listenDataReady();
+        if (status & 0x02) {  // gyro data ready
+            sx += imu_.readFloatGyroX() * DPS_TO_RAD;
+            sy += imu_.readFloatGyroY() * DPS_TO_RAD;
+            sz += imu_.readFloatGyroZ() * DPS_TO_RAD;
+            n++;
         }
-
-        Serial.println(ok ? "[IMU] BNO085 recovered" : "[IMU] ERROR: recovery failed");
-        last_data_ms_ = millis();
     }
+
+    if (n < 20) {
+        Serial.println("[IMU] Gyro calibration: too few samples, skipping");
+        return false;
+    }
+
+    gx_bias_ = (float)(sx / n);
+    gy_bias_ = (float)(sy / n);
+    gz_bias_ = (float)(sz / n);
+
+    // Sanity check: a still board should be well under 10°/s ≈ 0.175 rad/s.
+    constexpr float MAX_PLAUSIBLE = 0.175f;
+    if (fabsf(gx_bias_) > MAX_PLAUSIBLE ||
+        fabsf(gy_bias_) > MAX_PLAUSIBLE ||
+        fabsf(gz_bias_) > MAX_PLAUSIBLE) {
+        Serial.printf("[IMU] Gyro bias implausible (%.3f, %.3f, %.3f rad/s) — board moved during calibration?\n",
+                      gx_bias_, gy_bias_, gz_bias_);
+        gx_bias_ = gy_bias_ = gz_bias_ = 0.0f;
+        return false;
+    }
+
+    Serial.printf("[IMU] Gyro bias: %.4f, %.4f, %.4f rad/s (n=%lu)\n",
+                  gx_bias_, gy_bias_, gz_bias_, (unsigned long)n);
+    last_data_ms_ = millis();
+    return true;
 }

@@ -3,44 +3,46 @@
 #include <cstdint>
 
 // --- Firmware version ---
-#define FIRMWARE_VERSION "3.1"
+#define FIRMWARE_VERSION "4.0"
 
 // --- I2C Pin Assignments (ESP32 DevKit V1 default I2C bus) ---
-// SDA=21, SCL=22 are the ESP32 default Wire pins — used automatically
-static constexpr uint8_t PIN_BNO_RST = 4;
-static constexpr uint8_t PIN_BNO_INT = 2;   // BNO085 INT (active-low, data-ready signal)
-// BNO085 I2C address: 0x4A (default, DI pin low) or 0x4B (DI pin high)
+// SDA = GPIO 21, SCL = GPIO 22 — used automatically by Wire.begin()
+// LSM6DSO default I2C address (SA0/SDO pin pulled high on SmartElex breakout)
+static constexpr uint8_t LSM6DSO_I2C_ADDR = 0x6B;
 
 // --- IMU Configuration ---
-// 50 Hz is well within I2C budget. At 400 kHz I2C with ~32-byte SH2 packets
-// the bus can handle ~1500 tx/s; two reports at 50 Hz use only ~7% of capacity.
-static constexpr uint32_t IMU_REPORT_INTERVAL_US   = 20000; // 50 Hz
-static constexpr uint32_t IMU_NO_DATA_TIMEOUT_MS   = 10000; // watchdog: 10s startup headroom
-static constexpr uint8_t  IMU_INIT_MAX_RETRIES     = 5;
-static constexpr uint32_t IMU_INIT_RETRY_DELAY_MS  = 500;
-static constexpr uint32_t IMU_RESET_PULSE_MS       = 100;  // hold RST low long enough to fully reset
-static constexpr uint32_t IMU_RESET_WAIT_MS        = 1000; // wait for BNO085 firmware to fully boot
-
-// --- Calibration ---
-static constexpr uint16_t CALIBRATION_SAMPLE_COUNT  = 200;   // filter warm-up samples
-static constexpr uint32_t CALIBRATION_TIMEOUT_MS    = 10000;
-// Six-position accel calibration: samples per face, timeout per face
-static constexpr uint16_t ACCELCAL_SAMPLES_PER_FACE = 100;   // ~1 s at 100 Hz decimated
-static constexpr uint32_t ACCELCAL_TIMEOUT_MS       = 30000; // 30 s — user needs time to reposition
+// LSM6DSO ODR: 208 Hz. Accel range: ±4g  Gyro range: ±500 dps
+static constexpr uint32_t IMU_NO_DATA_TIMEOUT_MS = 5000;  // watchdog: 5s
+static constexpr uint8_t  IMU_INIT_MAX_RETRIES   = 5;
+static constexpr uint32_t IMU_INIT_RETRY_DELAY_MS = 500;
 
 // --- Serial ---
-static constexpr uint32_t SERIAL_BAUD_RATE        = 115200;
-static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 40;     // 25 Hz display rate
+// Bumped from 115200 → 921600 to reduce time spent in Serial.printf() on the
+// network loop. 50 Hz × ~30 chars = ~1.5 KB/s, well within budget at 921600.
+static constexpr uint32_t SERIAL_BAUD_RATE        = 921600;
+static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 20;   // 50 Hz output rate
 
 // --- WiFi ---
-static constexpr uint16_t WIFI_WS_PORT  = 81;
+static constexpr uint16_t WIFI_WS_PORT   = 81;
 static constexpr uint16_t WIFI_HTTP_PORT = 80;
 
+// mDNS responder (board reachable at http://<WIFI_HOSTNAME>.local). Set to 0
+// to disable for diagnostic purposes — the board is then only reachable via
+// its DHCP-assigned IP address, which is printed prominently at boot.
+// Disabling mDNS rules it out as a source of periodic stalls caused by
+// incoming query traffic on the LAN.
+#define MDNS_ENABLED 1
+
 // --- Mahony Filter ---
-static constexpr float MAHONY_KP               = 2.0f;    // proportional gain
-static constexpr float MAHONY_KI               = 0.005f;  // integral gain (bias estimation)
-static constexpr float MAHONY_ACCEL_GATE       = 4.0f;    // magnitude gate sharpness
-// Variance gate: sliding window length and threshold (g²)
-// Trust accel only when both magnitude ≈ 1g AND variance is below threshold.
-static constexpr uint8_t  MAHONY_VAR_WINDOW    = 16;      // samples (~128 ms at 125 Hz)
-static constexpr float    MAHONY_VAR_THRESHOLD = 0.002f;  // g² — above this = dynamic motion
+// Kp = proportional gain (higher = accel corrects gyro faster, more responsive but noisier)
+// Ki = integral gain (corrects slow gyro bias drift)
+// Tune Kp down if output is jittery; tune Kp up if it's too sluggish.
+static constexpr float MAHONY_KP               = 0.5f;
+static constexpr float MAHONY_KI               = 0.00005f;
+// Clamp on integral bias estimate (rad/s) so a runaway can never exceed
+// real gyro bias. Per-unit offsets are <10°/s; we calibrate them at boot.
+static constexpr float MAHONY_BIAS_CLAMP       = 0.05f;  // ~2.9°/s
+static constexpr float MAHONY_ACCEL_GATE       = 4.0f;   // magnitude gate sharpness
+// Variance gate: reject accel during dynamic motion (high variance = moving)
+static constexpr uint8_t  MAHONY_VAR_WINDOW    = 32;     // samples (~154 ms at 208 Hz)
+static constexpr float    MAHONY_VAR_THRESHOLD = 0.002f; // g² — above this = dynamic motion

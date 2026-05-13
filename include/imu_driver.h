@@ -1,44 +1,47 @@
 #pragma once
 
-#include <Adafruit_BNO08x.h>
+#include <Arduino.h>
+#include <Wire.h>
+#include <SparkFunLSM6DSO.h>
 #include "config.h"
 #include "types.h"
 
 class IMUDriver {
 public:
     bool begin();
-    bool update();         // poll for new data; returns true if any new report received
-    void checkReset();     // detect spontaneous BNO085 reset, re-enable reports
 
-    float getQuatW() const { return last_quat_[0]; }
-    float getQuatX() const { return last_quat_[1]; }
-    float getQuatY() const { return last_quat_[2]; }
-    float getQuatZ() const { return last_quat_[3]; }
+    // Poll sensor. Returns true if new data was read.
+    // Call as fast as possible in the main loop.
+    bool update();
 
-    float getGyroX() const { return last_gyro_[0]; }
-    float getGyroY() const { return last_gyro_[1]; }
-    float getGyroZ() const { return last_gyro_[2]; }
+    // Average gyro readings while board is still and store as bias.
+    // Caller must keep the board stationary for the duration.
+    // Returns true if calibration produced a plausible bias estimate.
+    bool calibrateGyro(uint32_t duration_ms = 800);
 
-    bool hasNewQuaternion() const { return new_quat_; }
-    bool hasNewGyroscope()  const { return new_gyro_; }
+    // Raw accel in m/s², bias-corrected gyro in rad/s
+    float getAccelX() const { return ax_; }
+    float getAccelY() const { return ay_; }
+    float getAccelZ() const { return az_; }
+    float getGyroX()  const { return gx_; }
+    float getGyroY()  const { return gy_; }
+    float getGyroZ()  const { return gz_; }
 
-    void clearNewQuaternion() { new_quat_ = false; }
-    void clearNewGyroscope()  { new_gyro_ = false; }
+    bool hasNewData() const { return new_data_; }
+    void clearNewData()     { new_data_ = false; }
 
-    // Reset the no-data watchdog timer. Call after blocking on user input.
+    // Reset the no-data watchdog timer (call after blocking operations)
     void resetWatchdog() { last_data_ms_ = millis(); }
 
 private:
-    Adafruit_BNO08x bno_{PIN_BNO_RST};
-    sh2_SensorValue_t sensor_value_{};
+    LSM6DSO imu_;
 
-    float last_quat_[4]  = {1.0f, 0.0f, 0.0f, 0.0f};  // w, x, y, z
-    float last_gyro_[3]  = {0.0f, 0.0f, 0.0f};
+    float ax_ = 0.0f, ay_ = 0.0f, az_ = 0.0f;  // m/s²
+    float gx_ = 0.0f, gy_ = 0.0f, gz_ = 0.0f;  // rad/s, bias-corrected
 
-    bool new_quat_ = false;
-    bool new_gyro_ = false;
+    // Per-unit gyro bias (rad/s). Subtracted from raw reads in update().
+    float gx_bias_ = 0.0f, gy_bias_ = 0.0f, gz_bias_ = 0.0f;
 
+    bool     new_data_     = false;
     uint32_t last_data_ms_ = 0;
-    void enableReports();
-    void hardReset();
 };

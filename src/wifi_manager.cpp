@@ -2,9 +2,16 @@
 #include "wifi_config.h"
 #include "serial_command.h"
 #include "config.h"
-#include <ESPAsyncWebServer.h>
+#include <esp_wifi.h>
+#if MDNS_ENABLED
+#  include <mdns.h>
+#endif
 #include <functional>
 #include <cstdlib>
+
+// Defined in main.cpp
+extern void zeroOrientation();
+extern void setDriftLog(bool on);
 
 static const struct { const char* ssid; const char* pass; } NETWORKS[] = WIFI_CREDENTIALS;
 static constexpr size_t   NETWORK_COUNT      = sizeof(NETWORKS) / sizeof(NETWORKS[0]);
@@ -93,8 +100,6 @@ input:focus { border-color: var(--blue); }
 
 .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
 
-.esp-info { font-size: 11px; color: var(--text3); font-family: var(--mono); padding: 4px 0 10px; min-height: 18px; }
-
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin-bottom: 10px; }
 @media (max-width: 600px) { .metrics { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 .metric { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 12px 14px; }
@@ -139,7 +144,13 @@ input:focus { border-color: var(--blue); }
   <h1>IMU BALANCE BOARD</h1>
   <span class="header-sub">BNO085 · ESP32 · WiFi</span>
   <div class="spacer"></div>
-  <span class="pill" id="hz-pill" style="display:none"><span id="hz-val">–</span> Hz</span>
+  <span class="pill" id="rssi-pill" style="display:none" title="WiFi signal strength">
+    <span id="rssi-val">–</span> dBm
+  </span>
+  <span class="pill" id="heap-pill" style="display:none;margin-left:6px" title="ESP32 free heap">
+    <span id="heap-val">–</span> KB
+  </span>
+  <span class="pill" id="hz-pill" style="display:none;margin-left:6px"><span id="hz-val">–</span> Hz</span>
   <span class="pill" style="margin-left:6px"><span class="dot" id="status-dot"></span><span id="status-text">Disconnected</span></span>
 </div>
 
@@ -177,19 +188,6 @@ input:focus { border-color: var(--blue); }
     </select>
     <span class="replay-name" id="replay-name"></span>
   </div>
-
-  <!-- Command row -->
-  <div class="controls" id="cmd-row" style="display:none">
-    <button onclick="sendCmd('START')"    class="btn-green">START</button>
-    <button onclick="sendCmd('STOP')"     class="btn-red">STOP</button>
-    <button onclick="sendCmd('STATUS')">STATUS</button>
-    <button onclick="sendCmd('HELP')">HELP</button>
-    <input  type="text" id="cmd-input" placeholder="RATE 25" style="width:110px">
-    <button id="btn-send-cmd">Send</button>
-  </div>
-
-  <!-- ESP32 status info line -->
-  <div class="esp-info" id="esp-info"></div>
 
   <div class="metrics">
     <div class="metric">
@@ -283,10 +281,10 @@ input:focus { border-color: var(--blue); }
   <div class="card">
     <div class="card-title">WebSocket Protocol</div>
     <p style="font-size:12px;color:var(--text2);line-height:1.8;font-family:var(--mono)">
-      Host: <span style="color:var(--text)">imuboard.local</span> &nbsp; HTTP: <span style="color:var(--text)">80</span> &nbsp; WS: <span style="color:var(--text)">81</span><br>
-      Frame: <span style="color:var(--text)">&lt;ms&gt;,&lt;roll&gt;,&lt;pitch&gt;,&lt;yaw&gt;</span><br>
-      Status: <span style="color:var(--text)">[STATUS] {json}</span><br>
-      Commands: <span style="color:var(--text)">START · STOP · STATUS · HELP · ZERO</span>
+      Host: <span style="color:var(--text)" id="about-host">imuboard.local</span> &nbsp; HTTP: <span style="color:var(--text)">80</span> &nbsp; WS: <span style="color:var(--text)">81</span><br>
+      Binary frame (default): 16 B LE — uint32 ms · float32 roll · pitch · yaw<br>
+      Text frame: <span style="color:var(--text)">&lt;ms&gt;,&lt;roll&gt;,&lt;pitch&gt;,&lt;yaw&gt;</span><br>
+      Status frame: <span style="color:var(--text)">[STATUS] {json}</span> — broadcast periodically
     </p>
   </div>
   <div class="card">
@@ -298,9 +296,9 @@ input:focus { border-color: var(--blue); }
   <div class="card">
     <div class="card-title">Hardware</div>
     <p style="font-size:12px;color:var(--text2);line-height:1.7">
-      ESP32 DevKit V1 + Adafruit BNO085 (I²C).<br>
-      Sensor fusion: Game Rotation Vector at 50 Hz (on-chip SH2 firmware).<br>
-      Output rate: 10 Hz default. Change with serial command: <span style="font-family:var(--mono);color:var(--text)">RATE 40</span>
+      ESP32 DevKit V1 + LSM6DSO (I²C).<br>
+      Sensor fusion: Mahony complementary filter at 208 Hz on-device.<br>
+      Output rate: 50 Hz over WebSocket.
     </p>
   </div>
 </div>
@@ -330,8 +328,23 @@ let prevRecPitch   = null;
 let timerHandle    = null;
 let sampleTimes    = [];
 
-// Interpolation: two most-recent received frames (wall-clock time at receipt)
-let prevFrame = null;  // { roll, pitch, wallT }
+// Session-wide sway accumulator (Welford online mean + covariance).
+// Resets on connect, on record start, and on replay load.
+let swayN     = 0;
+let swayMx    = 0;  // mean roll
+let swayMy    = 0;  // mean pitch
+let swayCxx   = 0;  // Σ (r-mx)²
+let swayCyy   = 0;  // Σ (p-my)²
+let swayCxy   = 0;  // Σ (r-mx)(p-my)
+
+// Interpolation: rolling jitter buffer of received frames
+// Rendering lags one nominal frame period behind so there is always a future
+// frame to interpolate toward, eliminating freeze-then-jump artefacts.
+const FRAME_MS   = 20;          // nominal 50 Hz inter-frame period
+const JITTER_LAG = FRAME_MS;    // render this many ms behind wall-clock
+const FRAME_BUF  = [];          // [{ roll, pitch, yaw, wallT }, ...]
+const FRAME_BUF_MAX = 8;        // keep at most 8 frames (~320 ms history)
+let prevFrame = null;           // kept for backwards compat with updateLive
 let currFrame = null;
 
 // Replay state
@@ -391,6 +404,16 @@ function initChart() {
   });
 }
 
+// Chart update throttle: pushing data is cheap, but chart.update() does a full
+// canvas redraw and is the most expensive thing in the WS message handler. At
+// 50 Hz it serialises the browser's event loop and slows WebSocket ACKs back
+// to the ESP32, which fills the ESP's TCP send buffer and stalls the
+// broadcast loop. Throttling to ~20 Hz keeps the chart looking smooth (no
+// visible loss of detail at 300-sample horizon) while freeing the event loop.
+const CHART_REDRAW_MS = 50;     // ≈20 Hz
+let chartDirty       = false;
+let chartLastDrawMs  = 0;
+
 function pushChartPoint(elapsed, roll, pitch, yaw) {
   chartData.labels.push(elapsed.toFixed(1) + 's');
   chartData.roll.push(roll);
@@ -400,8 +423,21 @@ function pushChartPoint(elapsed, roll, pitch, yaw) {
     chartData.labels.shift();
     chartData.roll.shift(); chartData.pitch.shift(); chartData.yaw.shift();
   }
-  if (chart) chart.update('none');
+  chartDirty = true;
 }
+
+// requestAnimationFrame loop: redraw chart at most CHART_REDRAW_MS apart,
+// regardless of incoming frame rate. Coalesces multiple WS updates into one
+// canvas redraw and yields the main thread back to the WS reader.
+(function chartRafLoop() {
+  requestAnimationFrame(chartRafLoop);
+  if (!chartDirty || !chart) return;
+  const now = performance.now();
+  if (now - chartLastDrawMs < CHART_REDRAW_MS) return;
+  chartLastDrawMs = now;
+  chartDirty = false;
+  chart.update('none');
+}());
 
 // ── Tilt plot ──────────────────────────────────────────────────────────────
 function clampToCircle(r, p, max) {
@@ -410,31 +446,42 @@ function clampToCircle(r, p, max) {
   return [r, p];
 }
 
+// Feed one sample into the session-wide Welford accumulator.
+function swayAccumulate(roll, pitch) {
+  swayN++;
+  const dx = roll  - swayMx;
+  const dy = pitch - swayMy;
+  swayMx += dx / swayN;
+  swayMy += dy / swayN;
+  const dx2 = roll  - swayMx;
+  const dy2 = pitch - swayMy;
+  swayCxx += dx * dx2;
+  swayCyy += dy * dy2;
+  swayCxy += dx * dy2;
+}
+
+function resetSwayAccumulator() {
+  swayN = 0; swayMx = 0; swayMy = 0;
+  swayCxx = 0; swayCyy = 0; swayCxy = 0;
+}
+
+// 70% prediction ellipse from session-wide mean/covariance.
+// For a 2D Gaussian, p=0.70 → chi-square critical value ≈ 2.408.
+// This is the region the user spent ~70% of their time within.
 function computeSwayEllipse() {
-  const n = trailFull ? TRAIL_LEN : trailHead;
-  if (n < 5) return null;
-  let sx = 0, sy = 0;
-  for (let i = 0; i < n; i++) {
-    const idx = trailFull ? (trailHead + i) % TRAIL_LEN : i;
-    sx += trailRoll[idx]; sy += trailPitch[idx];
-  }
-  const mx = sx / n, my = sy / n;
-  let cxx = 0, cyy = 0, cxy = 0;
-  for (let i = 0; i < n; i++) {
-    const idx = trailFull ? (trailHead + i) % TRAIL_LEN : i;
-    const dx = trailRoll[idx] - mx, dy = trailPitch[idx] - my;
-    cxx += dx * dx; cyy += dy * dy; cxy += dx * dy;
-  }
-  cxx /= (n - 1); cyy /= (n - 1); cxy /= (n - 1);
+  if (swayN < 5) return null;
+  const cxx = swayCxx / (swayN - 1);
+  const cyy = swayCyy / (swayN - 1);
+  const cxy = swayCxy / (swayN - 1);
   const trace = cxx + cyy;
   const det   = cxx * cyy - cxy * cxy;
   const disc  = Math.sqrt(Math.max(0, (trace / 2) ** 2 - det));
   const lam1  = trace / 2 + disc, lam2 = trace / 2 - disc;
-  const k     = Math.sqrt(5.991);
+  const k     = Math.sqrt(2.408);  // p = 0.70 (was 5.991 for p = 0.95)
   const semiA = Math.sqrt(Math.max(0, lam1)) * k;
   const semiB = Math.sqrt(Math.max(0, lam2)) * k;
   const angle = Math.atan2(2 * cxy, cxx - cyy) / 2;
-  return { cx: mx, cy: my, semiA, semiB, angle, area: Math.PI * semiA * semiB };
+  return { cx: swayMx, cy: swayMy, semiA, semiB, angle, area: Math.PI * semiA * semiB };
 }
 
 function drawTiltPlot(roll, pitch) {
@@ -472,7 +519,7 @@ function drawTiltPlot(roll, pitch) {
   if (ellipse) {
     const ex = cx + ellipse.cx * scale, ey = cy - ellipse.cy * scale;
     const aR = ellipse.semiA * scale, bR = ellipse.semiB * scale;
-    const early = (trailFull ? TRAIL_LEN : trailHead) < 20;
+    const early = swayN < 20;
     tiltCtx.save();
     tiltCtx.translate(ex, ey); tiltCtx.rotate(-ellipse.angle);
     tiltCtx.beginPath(); tiltCtx.ellipse(0, 0, Math.max(aR, 1), Math.max(bR, 1), 0, 0, Math.PI * 2);
@@ -532,29 +579,51 @@ function drawTiltPlot(roll, pitch) {
 drawTiltPlot(0, 0);
 
 // ── requestAnimationFrame render loop ─────────────────────────────────────
-// Interpolates between the last two received frames so the dot moves smoothly
-// at ~60 fps even when the ESP only sends at 25 Hz.
+// Renders JITTER_LAG ms behind wall-clock so there is always a bracketing
+// pair of received frames to interpolate between, eliminating freeze artefacts.
 (function rafLoop() {
   requestAnimationFrame(rafLoop);
-  if (!currFrame) return;
-  let roll, pitch;
-  if (prevFrame && currFrame.wallT > prevFrame.wallT) {
-    const span  = currFrame.wallT - prevFrame.wallT;
-    const alpha = Math.min(1, (performance.now() - prevFrame.wallT) / span);
-    roll  = prevFrame.roll  + alpha * (currFrame.roll  - prevFrame.roll);
-    pitch = prevFrame.pitch + alpha * (currFrame.pitch - prevFrame.pitch);
-  } else {
-    roll = currFrame.roll; pitch = currFrame.pitch;
+  if (FRAME_BUF.length < 2) {
+    if (FRAME_BUF.length === 1) {
+      lastRoll = FRAME_BUF[0].roll; lastPitch = FRAME_BUF[0].pitch;
+      drawTiltPlot(lastRoll, lastPitch);
+    }
+    return;
   }
+
+  const renderT = performance.now() - JITTER_LAG;
+
+  // Find the two frames that bracket renderT
+  let lo = 0;
+  for (let i = 1; i < FRAME_BUF.length - 1; i++) {
+    if (FRAME_BUF[i].wallT <= renderT) lo = i;
+    else break;
+  }
+  const hi = Math.min(lo + 1, FRAME_BUF.length - 1);
+
+  const a = FRAME_BUF[lo], b = FRAME_BUF[hi];
+  let roll, pitch;
+  if (a.wallT !== b.wallT) {
+    const alpha = Math.max(0, Math.min(1, (renderT - a.wallT) / (b.wallT - a.wallT)));
+    roll  = a.roll  + alpha * (b.roll  - a.roll);
+    pitch = a.pitch + alpha * (b.pitch - a.pitch);
+  } else {
+    roll = a.roll; pitch = a.pitch;
+  }
+
   lastRoll = roll; lastPitch = pitch;
   drawTiltPlot(roll, pitch);
 }());
 
 function clearVisuals() {
+  FRAME_BUF.length = 0;
+  prevFrame = null; currFrame = null;
   trailHead = 0; trailFull = false;
   trailRoll.fill(0); trailPitch.fill(0);
   ['labels','roll','pitch','yaw'].forEach(k => { chartData[k].length = 0; });
   chartStart = 0;
+  resetSwayAccumulator();
+  $('ss-sway').textContent = '–';
   if (chart) chart.update('none');
   drawTiltPlot(lastRoll, lastPitch);
 }
@@ -573,9 +642,13 @@ resizeCanvas();
 
 // ── Live update ────────────────────────────────────────────────────────────
 function updateLive(t, roll, pitch, yaw) {
-  // Advance interpolation frames (rAF loop reads these)
+  // Push into jitter buffer; rAF loop reads from it with a lag
+  const wallT = performance.now();
+  FRAME_BUF.push({ roll, pitch, yaw, wallT });
+  if (FRAME_BUF.length > FRAME_BUF_MAX) FRAME_BUF.shift();
+  // Keep legacy refs so replay path still works
   prevFrame = currFrame;
-  currFrame = { roll, pitch, wallT: performance.now() };
+  currFrame = { roll, pitch, wallT };
 
   $('v-roll').textContent  = roll.toFixed(2);
   $('v-pitch').textContent = pitch.toFixed(2);
@@ -583,13 +656,14 @@ function updateLive(t, roll, pitch, yaw) {
   const tilt = Math.sqrt(roll * roll + pitch * pitch);
   $('v-tilt').textContent  = tilt.toFixed(2);
 
-  // Trail stores actual received samples
+  // Trail stores actual received samples (used only for the fading tail line)
   trailRoll[trailHead]  = roll;
   trailPitch[trailHead] = pitch;
   trailHead = (trailHead + 1) % TRAIL_LEN;
   if (trailHead === 0) trailFull = true;
 
-  // Sway area (always visible, not just during recording)
+  // Session-wide sway ellipse: accumulate every sample since last reset
+  swayAccumulate(roll, pitch);
   const ellipse = computeSwayEllipse();
   $('ss-sway').textContent = ellipse ? ellipse.area.toFixed(2) : '–';
 
@@ -640,12 +714,19 @@ function connect() {
   userDisconnect = false;
 
   ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
     connected = true;
     setStatus('connected');
     log('Connected to ' + url, 'ok');
     initChart();
+    resetSwayAccumulator();
+    $('ss-sway').textContent = '–';
+    // Opt into binary frames: 16 B vs ~30 B per frame, no snprintf cost on
+    // the ESP32. The server falls back to text for any client that doesn't
+    // ask, so older dashboards keep working.
+    try { ws.send('BIN ON'); } catch (_) { /* ignore */ }
   };
 
   ws.onclose = () => {
@@ -666,23 +747,40 @@ function connect() {
   };
 
   ws.onmessage = (ev) => {
+    // Binary frame: 16 bytes little-endian — uint32 ms, float32 roll/pitch/yaw
+    if (ev.data instanceof ArrayBuffer) {
+      if (ev.data.byteLength < 16) return;
+      const dv = new DataView(ev.data);
+      const t = dv.getUint32(0, true);
+      const r = dv.getFloat32(4, true);
+      const p = dv.getFloat32(8, true);
+      const y = dv.getFloat32(12, true);
+      if ([t, r, p, y].some(v => Number.isNaN(v))) return;
+      updateLive(t, r, p, y);
+      return;
+    }
+
     const line = ev.data.trim();
     if (!line) return;
 
     if (line.startsWith('[STATUS]')) {
       try {
         const s = JSON.parse(line.slice(8).trim());
-        const parts = [];
-        if (s.ip)      parts.push('IP ' + s.ip);
-        if (s.port)    parts.push('port ' + s.port);
-        if (s.version) parts.push('fw v' + s.version);
-        if (s.heap)    parts.push('heap ' + Math.round(s.heap / 1024) + 'KB');
-        $('esp-info').textContent = parts.join(' · ');
-      } catch { /* ignore malformed status */ }
-      return;
-    }
-    if (line.startsWith('[INFO]')) {
-      log(line.slice(6).trim());
+        if (typeof s.rssi === 'number') {
+          $('rssi-val').textContent = s.rssi;
+          // Tint by link quality so the user knows when to move closer.
+          let color;
+          if      (s.rssi >= -65) color = 'var(--green)';
+          else if (s.rssi >= -75) color = 'var(--amber)';
+          else                    color = 'var(--red)';
+          $('rssi-val').style.color = color;
+          $('rssi-pill').style.display = '';
+        }
+        if (typeof s.heap === 'number') {
+          $('heap-val').textContent = Math.round(s.heap / 1024);
+          $('heap-pill').style.display = '';
+        }
+      } catch (_) { /* ignore malformed status */ }
       return;
     }
 
@@ -702,9 +800,10 @@ function disconnect() {
 }
 
 function sendCmd(cmd) {
+  // Some buttons still call this (e.g., the Zero button sends ZERO). Kept as
+  // a minimal helper. Logs only on error so the bottom log stays quiet.
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(cmd);
-    log('→ ' + cmd);
   } else {
     log('Not connected', 'warn');
   }
@@ -721,7 +820,6 @@ function setStatus(state) {
     $('btn-disconnect').disabled = false;
     $('btn-record').disabled     = false;
     $('btn-zero').disabled       = false;
-    $('cmd-row').style.display   = '';
   } else if (state === 'recording') {
     dot.classList.add('rec'); txt.textContent = 'Recording';
   } else {
@@ -731,10 +829,11 @@ function setStatus(state) {
     $('btn-record').disabled     = true;
     $('btn-stop').disabled       = true;
     $('btn-zero').disabled       = true;
-    $('cmd-row').style.display   = 'none';
     $('v-roll').textContent = $('v-pitch').textContent = $('v-yaw').textContent = $('v-tilt').textContent = '–';
     $('hz-pill').style.display = 'none';
-    $('esp-info').textContent = '';
+    $('rssi-pill').style.display = 'none';
+    $('heap-pill').style.display = 'none';
+    $('rssi-val').style.color = '';
     sampleTimes.length = 0;
   }
 }
@@ -743,6 +842,8 @@ function startRecording() {
   if (recording) return;
   csvRows = []; sampleCount = 0; peakTilt = 0; sumTilt = 0;
   swayPath = 0; prevRecRoll = null; prevRecPitch = null;
+  resetSwayAccumulator();
+  $('ss-sway').textContent = '–';
   sessionStart = Date.now();
   recording = true;
   $('btn-record').disabled = true;
@@ -980,15 +1081,6 @@ $('host-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') connect();
 });
 
-$('btn-send-cmd').addEventListener('click', () => {
-  const val = $('cmd-input').value.trim().toUpperCase();
-  if (val) { sendCmd(val); $('cmd-input').value = ''; }
-});
-
-$('cmd-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') $('btn-send-cmd').click();
-});
-
 $('max-angle-slider').addEventListener('input', () => {
   maxAngle = Number($('max-angle-slider').value);
   $('max-angle-label').textContent = `±${maxAngle}°`;
@@ -1014,9 +1106,13 @@ $('replay-speed').addEventListener('change', (e) => {
   replaySpeed = Number(e.target.value) || 1;
 });
 
-// Auto-connect when the page is served directly from the ESP32 over HTTP
+// Auto-connect when the page is served directly from the ESP32 over HTTP.
+// The hostname reflects whichever board served this page (imuboard350.local,
+// etc.) so the dashboard automatically scopes itself to that device.
 if (window.location.protocol === 'http:') {
   $('host-input').value = window.location.hostname;
+  $('about-host').textContent = window.location.hostname;
+  document.title = 'IMU Balance Board — ' + window.location.hostname;
   connect();
 }
 </script>
@@ -1039,7 +1135,30 @@ bool WifiManager::begin() {
     return true;
 }
 
+static const char* wlStatusStr(wl_status_t s) {
+    switch (s) {
+        case WL_IDLE_STATUS:      return "IDLE";
+        case WL_NO_SSID_AVAIL:    return "NO_SSID_AVAIL";
+        case WL_SCAN_COMPLETED:   return "SCAN_COMPLETED";
+        case WL_CONNECTED:        return "CONNECTED";
+        case WL_CONNECT_FAILED:   return "CONNECT_FAILED (auth/assoc)";
+        case WL_CONNECTION_LOST:  return "CONNECTION_LOST";
+        case WL_DISCONNECTED:     return "DISCONNECTED";
+        default:                  return "UNKNOWN";
+    }
+}
+
 bool WifiManager::_tryConnect() {
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(WIFI_PS_NONE);  // hard-disable WiFi modem sleep (stronger than setSleep(false))
+    // Max TX power. On marginal links this is the difference between sustained
+    // throughput and TCP retransmit storms that stall the dashboard.
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    // Disable AP roaming / re-scan behaviour — we're a stationary node and
+    // background scans can hold both cores for hundreds of ms. esp_wifi_set_*
+    // is the ESP-IDF underneath the Arduino WiFi class.
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     for (size_t i = 0; i < NETWORK_COUNT; i++) {
         Serial.printf("[WiFi] Trying: %s\n", NETWORKS[i].ssid);
         WiFi.begin(NETWORKS[i].ssid, NETWORKS[i].pass);
@@ -1052,36 +1171,71 @@ bool WifiManager::_tryConnect() {
         Serial.println();
 
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("[WiFi] Connected: %s  IP=%s  RSSI=%d dBm  ch=%d\n",
+                          NETWORKS[i].ssid,
+                          WiFi.localIP().toString().c_str(),
+                          WiFi.RSSI(),
+                          WiFi.channel());
             return true;
         }
 
-        WiFi.disconnect(true);
-        delay(100);
+        Serial.printf("[WiFi] Failed: %s — status=%s\n",
+                      NETWORKS[i].ssid, wlStatusStr(WiFi.status()));
+        WiFi.disconnect(true, true);
+        delay(500);
     }
     return false;
 }
 
 void WifiManager::_startServer() {
-    if (MDNS.begin("imuboard")) {
-        MDNS.addService("http", "tcp", WIFI_HTTP_PORT);
-        MDNS.addService("ws",   "tcp", WIFI_WS_PORT);
-        Serial.println("[WiFi] mDNS: imuboard.local");
+#if MDNS_ENABLED
+    // Native IDF mDNS: runs in its own task so query bursts can never block
+    // the sensor task (core 0) or the WS broadcast (core 1). Task priority
+    // is set low via CONFIG_MDNS_TASK_PRIORITY in platformio.ini build flags.
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        Serial.printf("[WiFi] mDNS init failed: %d\n", (int)err);
+    } else {
+        mdns_hostname_set(WIFI_HOSTNAME);
+        mdns_instance_name_set("IMU Balance Board");
+        mdns_service_add(NULL, "_http", "_tcp", WIFI_HTTP_PORT, NULL, 0);
+        mdns_service_add(NULL, "_ws",   "_tcp", WIFI_WS_PORT,   NULL, 0);
+        Serial.printf("[WiFi] mDNS: %s.local (native, isolated task)\n", WIFI_HOSTNAME);
     }
+#else
+    Serial.println("[WiFi] mDNS DISABLED (set MDNS_ENABLED 1 in config.h to re-enable)");
+#endif
 
-    _http = new AsyncWebServer(WIFI_HTTP_PORT);
-    _http->on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send_P(200, "text/html", DASHBOARD_HTML);
-    });
-    _http->onNotFound([](AsyncWebServerRequest* req) {
-        req->send_P(200, "text/html", DASHBOARD_HTML);
-    });
+    // Always print the IP + MAC banner. The MAC is the stable hardware ID you
+    // give your router when setting up a DHCP reservation for this board.
+    Serial.println("========================================");
+    Serial.printf("  Hostname: %s\n", WIFI_HOSTNAME);
+    Serial.printf("  MAC:      %s   (use this in router's DHCP reservation)\n",
+                  WiFi.macAddress().c_str());
+    Serial.printf("  IP:       %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("  Open the dashboard at:\n");
+#if MDNS_ENABLED
+    Serial.printf("    http://%s.local/   (mDNS)\n", WIFI_HOSTNAME);
+#endif
+    Serial.printf("    http://%s/   (direct IP)\n",
+                  WiFi.localIP().toString().c_str());
+    Serial.println("========================================");
+
+    // Synchronous HTTP server (no AsyncTCP). The dashboard HTML is the only
+    // resource served, and only once per page-load. _pollHttp() runs from
+    // poll() on the Arduino loop task — no extra task, no contention with
+    // the sensor task or the WebSocket broadcast.
+    _http = new WiFiServer(WIFI_HTTP_PORT);
     _http->begin();
-    Serial.printf("[WiFi] HTTP server on :%u\n", WIFI_HTTP_PORT);
+    _http->setNoDelay(true);
+    Serial.printf("[WiFi] HTTP server on :%u (synchronous)\n", WIFI_HTTP_PORT);
 
     _ws = new WebSocketsServer(WIFI_WS_PORT);
     _ws->begin();
-    _ws->enableHeartbeat(15000, 3000, 2);
+    // Heartbeat disabled: the WebSockets library's ping/pong path can stall
+    // the loop for 100-200 ms on missed pongs. Browsers send their own
+    // TCP-level keepalives so we don't lose much by removing it.
+    // _ws->enableHeartbeat(15000, 3000, 2);
     _ws->onEvent([this](uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
         this->_onEvent(num, type, payload, length);
     });
@@ -1107,31 +1261,277 @@ void WifiManager::poll() {
         return;
     }
 
-    if (_ws) _ws->loop();
+    if (_ws) {
+        uint32_t t0 = micros();
+        _ws->loop();
+        uint32_t d = micros() - t0;
+        if (d > _maxWsLoopUs) _maxWsLoopUs = d;
+        _totWsLoopUs += d;
+        _wsLoopCalls++;
+    }
+    {
+        uint32_t t0 = micros();
+        _pollHttp();
+        uint32_t d = micros() - t0;
+        if (d > _maxHttpPollUs) _maxHttpPollUs = d;
+    }
+
+    uint32_t now = millis();
+
+    // Periodically push a fresh STATUS to connected clients so the dashboard
+    // info line (IP / RSSI / heap / ch) stays current. Cheap: ~200-byte text
+    // frame at 0.5 Hz.
+    if (_clientCount > 0) {
+        if (now - _lastStatusMs >= 2000) {
+            _lastStatusMs = now;
+            sendStatus();  // broadcast
+        }
+    }
+
+    // Per-second diagnostic line. Compare tx/s to the expected output rate
+    // (50 Hz default). Drops indicate the loop got stuck for that second.
+    // sample/s shows IMU sampling rate on core 0 — should be ~208 Hz.
+    if (now - _lastStatsMs >= 1000) {
+        extern volatile uint32_t g_sample_count;
+        extern volatile uint32_t g_max_update_us;
+        extern volatile uint32_t g_max_loopgap_us;
+        extern volatile uint32_t g_skipped_dt;
+        static uint32_t last_samples = 0;
+        uint32_t samples_now = g_sample_count;
+        uint32_t samples_delta = samples_now - last_samples;
+        last_samples = samples_now;
+
+        uint32_t imu_update_us = g_max_update_us;
+        uint32_t imu_loopgap_us = g_max_loopgap_us;
+        uint32_t imu_skipped    = g_skipped_dt;
+        g_max_update_us  = 0;
+        g_max_loopgap_us = 0;
+        g_skipped_dt     = 0;
+
+        uint32_t avgWsLoopUs = _wsLoopCalls ? (_totWsLoopUs / _wsLoopCalls) : 0;
+
+        Serial.printf("[STATS] tx=%lu/s drop=%lu rx=%lu/s samples=%lu/s maxGap=%lums "
+                      "send=%luus wsLoop=max%luus,avg%luus http=%luus "
+                      "imuUpd=%luus imuGap=%luus dtSkip=%lu "
+                      "heap=%luKB rssi=%d clients=%d\n",
+                      (unsigned long)_txFrames,
+                      (unsigned long)_droppedFrames,
+                      (unsigned long)_rxMsgs,
+                      (unsigned long)samples_delta,
+                      (unsigned long)_maxGapMs,
+                      (unsigned long)_maxSendFrameUs,
+                      (unsigned long)_maxWsLoopUs,
+                      (unsigned long)avgWsLoopUs,
+                      (unsigned long)_maxHttpPollUs,
+                      (unsigned long)imu_update_us,
+                      (unsigned long)imu_loopgap_us,
+                      (unsigned long)imu_skipped,
+                      (unsigned long)(ESP.getFreeHeap() / 1024),
+                      WiFi.RSSI(),
+                      (int)_clientCount);
+
+        // Focused stall report when something held the broadcast loop > 200 ms.
+        // Breakdown maps to root cause:
+        //   imuUpd / imuGap large → I2C bus stalled (vibration / loose wires)
+        //   send / wsLoop large  → TCP / WS library blocked (network layer)
+        //   http large           → a synchronous HTTP request was slow
+        //   All small but maxGap big → loop task preempted by WiFi driver
+        if (_maxGapMs > 200) {
+            const char* hint = "loop preempted (WiFi driver / lwIP timer)";
+            if (imu_update_us > 100000 || imu_loopgap_us > 100000) {
+                hint = "I2C BUS STALL — check IMU wiring / vibration";
+            } else if (_maxSendFrameUs > 100000 || _maxWsLoopUs > 100000) {
+                hint = "WS/TCP stall — network layer";
+            } else if (_maxHttpPollUs > 100000) {
+                hint = "HTTP request stall";
+            }
+            // Cross-core test: if imu_loopgap on core 0 stayed normal during
+            // the stall, the preemption was core-1-local (lwIP, async helpers,
+            // mDNS responder reply). If imu_loopgap also spiked, both cores
+            // froze — points at the WiFi driver, which can pause both cores
+            // during association recovery or channel work.
+            const char* scope = (imu_loopgap_us > 50000)
+                ? "BOTH CORES froze (WiFi driver / global lock)"
+                : "core-1 only (lwIP / WS / mDNS reply on core 1)";
+            Serial.printf("[STALL] maxGap=%lums  send=%luus wsLoop=%luus http=%luus "
+                          "imuUpd=%luus imuGap=%luus  → %s   [%s]\n",
+                          (unsigned long)_maxGapMs,
+                          (unsigned long)_maxSendFrameUs,
+                          (unsigned long)_maxWsLoopUs,
+                          (unsigned long)_maxHttpPollUs,
+                          (unsigned long)imu_update_us,
+                          (unsigned long)imu_loopgap_us,
+                          hint,
+                          scope);
+        }
+
+        _txFrames        = 0;
+        _droppedFrames   = 0;
+        _rxMsgs          = 0;
+        _maxGapMs        = 0;
+        _maxSendFrameUs  = 0;
+        _maxWsLoopUs     = 0;
+        _maxHttpPollUs   = 0;
+        _totWsLoopUs     = 0;
+        _wsLoopCalls     = 0;
+        _lastStatsMs     = now;
+    }
 }
 
 void WifiManager::sendFrame(uint32_t ms, float roll, float pitch, float yaw) {
     if (!_wifiOk || !_ws || _clientCount <= 0) return;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%lu,%.2f,%.2f,%.2f", (unsigned long)ms, roll, pitch, yaw);
-    _ws->broadcastTXT(buf);
+
+    uint32_t now = millis();
+
+    // Send-watchdog: if a recent send was slow, skip new sends for COOLOFF_MS
+    // so the TCP socket buffer can drain. Without this, the client can hold
+    // us in a slow loop of barely-recovering writes.
+    if (now < _coolOffUntilMs) {
+        _droppedFrames++;
+        return;
+    }
+
+    // Track inter-send gap. A long gap here = the broadcast loop got stuck
+    // somewhere between the previous frame and this one.
+    if (_lastTxMs != 0) {
+        uint32_t gap = now - _lastTxMs;
+        if (gap > _maxGapMs) _maxGapMs = gap;
+    }
+    _lastTxMs = now;
+    uint32_t sendStartUs = micros();
+
+    // Tally the connected clients' mode preferences. Common case: one browser
+    // tab in BIN mode → single broadcastBIN call. Mixed mode falls back to
+    // per-client sends.
+    uint8_t n_bin = 0, n_txt = 0;
+    for (uint8_t i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (!_ws->clientIsConnected(i)) continue;
+        if (_binMode[i]) n_bin++;
+        else             n_txt++;
+    }
+    if (n_bin == 0 && n_txt == 0) return;
+
+    // Binary frame: 16 bytes little-endian (ESP32 native). Layout:
+    //   [0..3]   uint32  ms
+    //   [4..7]   float32 roll
+    //   [8..11]  float32 pitch
+    //   [12..15] float32 yaw
+    uint8_t bin[16];
+    memcpy(bin + 0,  &ms,    4);
+    memcpy(bin + 4,  &roll,  4);
+    memcpy(bin + 8,  &pitch, 4);
+    memcpy(bin + 12, &yaw,   4);
+
+    // Text frame (legacy / default): CSV. Built only if needed.
+    char txt[64];
+    int  txt_len = 0;
+    if (n_txt > 0) {
+        txt_len = snprintf(txt, sizeof(txt), "%lu,%.2f,%.2f,%.2f",
+                           (unsigned long)ms, roll, pitch, yaw);
+    }
+
+    // Fast paths: all-binary or all-text → single library broadcast call.
+    if (n_bin > 0 && n_txt == 0) {
+        _ws->broadcastBIN(bin, sizeof(bin));
+        _txFrames++;
+    } else if (n_txt > 0 && n_bin == 0) {
+        if (txt_len > 0) _ws->broadcastTXT((uint8_t*)txt, (size_t)txt_len);
+        _txFrames++;
+    } else {
+        // Mixed mode: fan out per client.
+        for (uint8_t i = 0; i < MAX_WS_CLIENTS; i++) {
+            if (!_ws->clientIsConnected(i)) continue;
+            if (_binMode[i]) {
+                _ws->sendBIN(i, bin, sizeof(bin));
+            } else if (txt_len > 0) {
+                _ws->sendTXT(i, (uint8_t*)txt, (size_t)txt_len);
+            }
+        }
+        _txFrames++;
+    }
+
+    uint32_t durUs = micros() - sendStartUs;
+    if (durUs > _maxSendFrameUs) _maxSendFrameUs = durUs;
+
+    // If this send was slow, the client is congested — back off and let TCP
+    // drain. WEBSOCKETS_TCP_TIMEOUT caps the worst single-send wait, but if
+    // we hit it once, the next attempt is likely to hit it again immediately.
+    if (durUs >= SLOW_SEND_US) {
+        _coolOffUntilMs = millis() + COOLOFF_MS;
+    }
+}
+
+void WifiManager::_pollHttp() {
+    if (!_http) return;
+    WiFiClient client = _http->available();
+    if (!client) return;
+
+    // Drain the request line + headers. We don't actually care what the
+    // request is — there's only one resource. Bail after ~1 s if peer is slow.
+    uint32_t deadline = millis() + 1000;
+    bool blank = false;
+    String line;
+    while (client.connected() && millis() < deadline) {
+        if (!client.available()) { delay(1); continue; }
+        char c = client.read();
+        if (c == '\n') {
+            if (blank) break;       // end of headers
+            blank = true;
+            line = "";
+        } else if (c != '\r') {
+            blank = false;
+            if (line.length() < 256) line += c;
+        }
+    }
+
+    // Response: HTTP/1.1 200 + Content-Length so the browser closes cleanly.
+    // DASHBOARD_HTML is a PROGMEM string literal; sizeof - 1 excludes the
+    // trailing NUL.
+    const size_t html_len = sizeof(DASHBOARD_HTML) - 1;
+    char hdr[160];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n"
+        "Cache-Control: no-store\r\n"
+        "\r\n",
+        (unsigned)html_len);
+    client.write((const uint8_t*)hdr, (size_t)hdr_len);
+
+    // Stream the body in 1 KB chunks so we don't allocate a huge intermediate.
+    // PROGMEM access is byte-readable on ESP32 (no need for pgm_read_byte_far).
+    constexpr size_t CHUNK = 1024;
+    size_t sent = 0;
+    while (sent < html_len && client.connected()) {
+        size_t n = (html_len - sent) < CHUNK ? (html_len - sent) : CHUNK;
+        client.write((const uint8_t*)(DASHBOARD_HTML + sent), n);
+        sent += n;
+    }
+    client.flush();
+    client.stop();
 }
 
 void WifiManager::sendStatus(int8_t targetClient) {
     if (!_wifiOk || !_ws) return;
-    char buf[160];
+    char buf[224];
     snprintf(buf, sizeof(buf),
-        "[STATUS] {\"streaming\":%s,\"ip\":\"%s\",\"port\":%u,\"heap\":%lu,\"version\":\"%s\"}",
+        "[STATUS] {\"streaming\":%s,\"ip\":\"%s\",\"port\":%u,\"heap\":%lu,"
+        "\"version\":\"%s\",\"rssi\":%d,\"ch\":%d,\"ssid\":\"%s\"}",
         (_streaming && *_streaming) ? "true" : "false",
         WiFi.localIP().toString().c_str(),
         WIFI_WS_PORT,
         (unsigned long)ESP.getFreeHeap(),
-        FIRMWARE_VERSION);
+        FIRMWARE_VERSION,
+        WiFi.RSSI(),
+        WiFi.channel(),
+        WiFi.SSID().c_str());
 
+    size_t len = strlen(buf);
     if (targetClient >= 0) {
-        _ws->sendTXT((uint8_t)targetClient, buf);
+        _ws->sendTXT((uint8_t)targetClient, (uint8_t*)buf, len);
     } else {
-        _ws->broadcastTXT(buf);
+        _ws->broadcastTXT((uint8_t*)buf, len);
     }
 }
 
@@ -1139,8 +1539,20 @@ void WifiManager::_onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t 
     switch (type) {
         case WStype_CONNECTED: {
             IPAddress ip = _ws->remoteIP(num);
+            // Single-client policy. If one is already connected, refuse the new
+            // arrival so we don't double our broadcast load. The replaced
+            // client gets an INFO line + immediate disconnect; the existing
+            // session is preserved.
+            if (_clientCount > 0) {
+                Serial.printf("[WiFi WS] Client #%u from %s REJECTED (slot busy)\n",
+                              num, ip.toString().c_str());
+                _ws->sendTXT(num, "[INFO] Another client is already connected — disconnecting.");
+                _ws->disconnect(num);
+                break;
+            }
             Serial.printf("[WiFi WS] Client #%u connected from %s\n", num, ip.toString().c_str());
             _clientCount++;
+            if (num < MAX_WS_CLIENTS) _binMode[num] = false;
             sendStatus((int8_t)num);
             break;
         }
@@ -1148,10 +1560,12 @@ void WifiManager::_onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t 
             Serial.printf("[WiFi WS] Client #%u disconnected\n", num);
             _clientCount--;
             if (_clientCount < 0) _clientCount = 0;
+            if (num < MAX_WS_CLIENTS) _binMode[num] = false;
             break;
 
         case WStype_TEXT: {
             if (!payload || length == 0) break;
+            _rxMsgs++;
             char cmd[32] = {};
             size_t n = length < sizeof(cmd) - 1 ? length : sizeof(cmd) - 1;
             memcpy(cmd, payload, n);
@@ -1167,9 +1581,24 @@ void WifiManager::_onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t 
             } else if (strcmp(cmd, "STATUS") == 0) {
                 sendStatus((int8_t)num);
             } else if (strcmp(cmd, "HELP") == 0) {
-                _ws->sendTXT(num, "[INFO] Commands: START STOP STATUS HELP ZERO RATE <hz>");
+                _ws->sendTXT(num, "[INFO] Commands: START STOP STATUS HELP ZERO RATE <hz> DEBUG ON|OFF BIN ON|OFF");
+            } else if (strcmp(cmd, "BIN ON") == 0) {
+                if (num < MAX_WS_CLIENTS) _binMode[num] = true;
+                _ws->sendTXT(num, "[INFO] Binary frame mode ON");
+                Serial.printf("[WiFi WS] Client #%u → binary mode\n", num);
+            } else if (strcmp(cmd, "BIN OFF") == 0) {
+                if (num < MAX_WS_CLIENTS) _binMode[num] = false;
+                _ws->sendTXT(num, "[INFO] Binary frame mode OFF");
+                Serial.printf("[WiFi WS] Client #%u → text mode\n", num);
             } else if (strcmp(cmd, "ZERO") == 0) {
-                _ws->sendTXT(num, "[INFO] ZERO not yet implemented");
+                zeroOrientation();
+                _ws->sendTXT(num, "[INFO] Orientation zeroed");
+            } else if (strcmp(cmd, "DEBUG ON") == 0) {
+                setDriftLog(true);
+                _ws->sendTXT(num, "[INFO] Drift log ON");
+            } else if (strcmp(cmd, "DEBUG OFF") == 0) {
+                setDriftLog(false);
+                _ws->sendTXT(num, "[INFO] Drift log OFF");
             } else if (strncmp(cmd, "RATE ", 5) == 0) {
                 int hz = atoi(cmd + 5);
                 if (hz < 1)  hz = 1;
