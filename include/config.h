@@ -26,12 +26,10 @@ static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 20;   // 50 Hz output rate
 static constexpr uint16_t WIFI_WS_PORT   = 81;
 static constexpr uint16_t WIFI_HTTP_PORT = 80;
 
-// mDNS responder (board reachable at http://<WIFI_HOSTNAME>.local). Set to 0
-// to disable for diagnostic purposes — the board is then only reachable via
-// its DHCP-assigned IP address, which is printed prominently at boot.
-// Disabling mDNS rules it out as a source of periodic stalls caused by
-// incoming query traffic on the LAN.
-#define MDNS_ENABLED 1
+// mDNS responder. Disabled — was found to cause periodic dual-core stalls
+// from incoming multicast query bursts on the LAN. The board is reachable
+// via its DHCP-reserved IP address, printed prominently in the boot banner.
+#define MDNS_ENABLED 0
 
 // --- Mahony Filter ---
 // Kp = proportional gain (higher = accel corrects gyro faster, more responsive but noisier)

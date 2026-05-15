@@ -44,13 +44,12 @@ struct SensorSnapshot {
 static SensorSnapshot          g_snap         = {};
 static std::atomic<uint32_t>   g_snap_seq{0};   // even = stable, odd = writing
 static volatile bool           g_snap_init    = false;
-volatile uint32_t              g_sample_count = 0;  // monotonic, sensor-task only — externally visible for diagnostics
 
-// Sensor task health diagnostics, written only by sensor task on core 0.
-// Reset by the WS poll() once per second when printed.
-volatile uint32_t              g_max_update_us       = 0;  // longest single g_imu.update() call
-volatile uint32_t              g_max_loopgap_us      = 0;  // longest gap between successive samples
-volatile uint32_t              g_skipped_dt          = 0;  // samples rejected for dt out of range (1 s window)
+// Monotonic sample counter incremented every time the sensor task publishes
+// a fresh snapshot. Read by WifiManager::poll() to compute samples/s for
+// the diagnostic [STATS] line. Volatile because it crosses cores (writer
+// on core 0, reader on core 1).
+volatile uint32_t              g_sample_count = 0;
 
 // Publishes the latest snapshot. Called only from the sensor task.
 static void publishSnapshot(const EulerAngles& ema,
@@ -119,20 +118,9 @@ static void sensorTask(void* /*pv*/) {
     uint32_t    last_us   = micros();
 
     for (;;) {
-        // Time the IMU update call itself. Spikes here indicate I2C bus
-        // trouble — vibration-induced bad contacts cause Wire to retry or
-        // stall in busy-wait, which blocks the sensor task for ms-to-s.
-        uint32_t update_start = micros();
-        bool got = g_imu.update();
-        uint32_t update_dur = micros() - update_start;
-        if (update_dur > g_max_update_us) g_max_update_us = update_dur;
-
-        if (got) {
+        if (g_imu.update()) {
             uint32_t now_us = micros();
-            uint32_t gap = now_us - last_us;
-            if (gap > g_max_loopgap_us) g_max_loopgap_us = gap;
-
-            float dt = gap * 1e-6f;
+            float dt = (now_us - last_us) * 1e-6f;
             last_us = now_us;
 
             if (dt > 0.0f && dt < 0.5f) {
@@ -151,8 +139,6 @@ static void sensorTask(void* /*pv*/) {
                                 g_mahony.getLastTrust(),
                                 millis());
                 g_sample_count++;
-            } else {
-                g_skipped_dt++;
             }
             g_imu.clearNewData();
         }

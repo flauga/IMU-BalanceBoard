@@ -336,14 +336,29 @@ let swayMy    = 0;  // mean pitch
 let swayCxx   = 0;  // Σ (r-mx)²
 let swayCyy   = 0;  // Σ (p-my)²
 let swayCxy   = 0;  // Σ (r-mx)(p-my)
+// When true, the accumulator stops growing and the displayed value freezes
+// on whatever the final number was. Set by Stop Session; cleared by Start
+// Session, Zero, or Connect.
+let swayFrozen = false;
 
-// Interpolation: rolling jitter buffer of received frames
-// Rendering lags one nominal frame period behind so there is always a future
-// frame to interpolate toward, eliminating freeze-then-jump artefacts.
+// Jitter buffer: playback is keyed on the ESP32's deviceMs timestamp, not
+// browser arrival time. This means a network stall (e.g. 1.5 s where no
+// frames arrive then 75 burst at once) plays back at the original 50 Hz
+// pace — the lag absorbs it, and rendering stays smooth instead of
+// "fast-forwarding" through the burst.
+//
+// JITTER_LAG sets how much cushion we keep. With the dedicated wifi_tx task
+// on the ESP32 the big multi-second stalls are gone, so the lag only needs
+// to smooth out small jitter from the network and rAF scheduling. 200 ms
+// keeps the dashboard feeling responsive while still hiding 100-150 ms
+// hiccups. Device-time playback (see updateLive) ensures any burst of
+// late frames plays back at 50 Hz, not at burst speed.
 const FRAME_MS   = 20;          // nominal 50 Hz inter-frame period
-const JITTER_LAG = FRAME_MS;    // render this many ms behind wall-clock
-const FRAME_BUF  = [];          // [{ roll, pitch, yaw, wallT }, ...]
-const FRAME_BUF_MAX = 8;        // keep at most 8 frames (~320 ms history)
+const JITTER_LAG = 200;         // ms of playback cushion behind real time
+const FRAME_BUF  = [];          // [{ roll, pitch, yaw, wallT, deviceMs }, ...]
+// Hold ~1.5 s of history at 50 Hz — well above JITTER_LAG so an occasional
+// gap longer than the lag still has frames buffered when they arrive.
+const FRAME_BUF_MAX = 75;
 let prevFrame = null;           // kept for backwards compat with updateLive
 let currFrame = null;
 
@@ -579,50 +594,122 @@ function drawTiltPlot(roll, pitch) {
 drawTiltPlot(0, 0);
 
 // ── requestAnimationFrame render loop ─────────────────────────────────────
-// Renders JITTER_LAG ms behind wall-clock so there is always a bracketing
-// pair of received frames to interpolate between, eliminating freeze artefacts.
+// Single source of truth for every visible element: dot, trail, metric tiles,
+// time chart, sway ellipse. All driven from a buffer playhead running
+// JITTER_LAG ms behind real device time so network stalls are absorbed
+// invisibly. Live-arrival concerns (Hz pill, CSV recording) stay in
+// updateLive() since they need the actual arrival timeline.
+//
+// The playhead is in DEVICE TIME (the ESP32's millis() timestamp on each
+// frame), not browser wall-clock. So when 75 frames burst-arrive after a
+// 1 s stall, they still play back at 50 Hz — not at the arrival burst rate.
+//
+// On first connection we sync device-time to wall-clock by recording the
+// offset (deviceMs0 - now0) and then renderDeviceMs = nowT - offset - lag.
+let deviceWallOffset   = 0;   // wallT(arrival) - deviceMs(frame) for first frame
+let firstFrameSynced   = false;
+let lastConsumedDevMs  = 0;   // deviceMs of last frame whose state-updates
+                              //   (trail, chart, sway) we've processed.
+let bufferStartDevMs   = 0;   // device-ms of the very first frame, used as
+                              //   the time-zero for the chart X axis.
+
 (function rafLoop() {
   requestAnimationFrame(rafLoop);
+  if (FRAME_BUF.length < 1) return;
+
+  // Sync device time to wall time on first frame
+  if (!firstFrameSynced) {
+    const f0 = FRAME_BUF[0];
+    deviceWallOffset = f0.wallT - f0.deviceMs;
+    bufferStartDevMs = f0.deviceMs;
+    lastConsumedDevMs = f0.deviceMs - 1;  // so frame 0 gets consumed
+    firstFrameSynced = true;
+  }
+
+  // Playback position, in device-ms space.
+  const nowT = performance.now();
+  const sinceStart = nowT - (bufferStartDevMs + deviceWallOffset);
+  const effectiveLag = Math.min(JITTER_LAG, sinceStart);
+  // renderDevMs is "what deviceMs should we be showing right now?"
+  const renderDevMs = nowT - deviceWallOffset - effectiveLag;
+
   if (FRAME_BUF.length < 2) {
-    if (FRAME_BUF.length === 1) {
-      lastRoll = FRAME_BUF[0].roll; lastPitch = FRAME_BUF[0].pitch;
-      drawTiltPlot(lastRoll, lastPitch);
-    }
+    lastRoll = FRAME_BUF[0].roll; lastPitch = FRAME_BUF[0].pitch;
+    drawTiltPlot(lastRoll, lastPitch);
     return;
   }
 
-  const renderT = performance.now() - JITTER_LAG;
-
-  // Find the two frames that bracket renderT
+  // Find the two frames bracketing renderDevMs in device time.
   let lo = 0;
   for (let i = 1; i < FRAME_BUF.length - 1; i++) {
-    if (FRAME_BUF[i].wallT <= renderT) lo = i;
+    if (FRAME_BUF[i].deviceMs <= renderDevMs) lo = i;
     else break;
   }
   const hi = Math.min(lo + 1, FRAME_BUF.length - 1);
 
   const a = FRAME_BUF[lo], b = FRAME_BUF[hi];
-  let roll, pitch;
-  if (a.wallT !== b.wallT) {
-    const alpha = Math.max(0, Math.min(1, (renderT - a.wallT) / (b.wallT - a.wallT)));
+  let roll, pitch, yaw;
+  if (a.deviceMs !== b.deviceMs) {
+    const alpha = Math.max(0, Math.min(1,
+      (renderDevMs - a.deviceMs) / (b.deviceMs - a.deviceMs)));
     roll  = a.roll  + alpha * (b.roll  - a.roll);
     pitch = a.pitch + alpha * (b.pitch - a.pitch);
+    yaw   = a.yaw   + alpha * (b.yaw   - a.yaw);
   } else {
-    roll = a.roll; pitch = a.pitch;
+    roll = a.roll; pitch = a.pitch; yaw = a.yaw;
   }
 
+  // Interpolated values drive everything visible.
   lastRoll = roll; lastPitch = pitch;
   drawTiltPlot(roll, pitch);
+
+  $('v-roll').textContent  = roll.toFixed(2);
+  $('v-pitch').textContent = pitch.toFixed(2);
+  $('v-yaw').textContent   = yaw.toFixed(2);
+  const tilt = Math.sqrt(roll * roll + pitch * pitch);
+  $('v-tilt').textContent  = tilt.toFixed(2);
+
+  // Walk every frame the playhead has crossed since the last rAF tick and
+  // update sample-paced visuals (trail, sway, chart). Keyed on deviceMs so
+  // each real sample is consumed exactly once, at the right pace.
+  for (let i = 0; i < FRAME_BUF.length; i++) {
+    const f = FRAME_BUF[i];
+    if (f.deviceMs <= lastConsumedDevMs) continue;
+    if (f.deviceMs > renderDevMs) break;
+    trailRoll[trailHead]  = f.roll;
+    trailPitch[trailHead] = f.pitch;
+    trailHead = (trailHead + 1) % TRAIL_LEN;
+    if (trailHead === 0) trailFull = true;
+    if (!swayFrozen) swayAccumulate(f.roll, f.pitch);
+    const elapsedS = (f.deviceMs - bufferStartDevMs) / 1000;
+    pushChartPoint(elapsedS, f.roll, f.pitch, f.yaw);
+    lastConsumedDevMs = f.deviceMs;
+  }
+
+  // When frozen, leave the displayed sway number untouched — it represents
+  // the final value at Stop time. drawTiltPlot still draws the (now-static)
+  // ellipse from the unchanged accumulator state.
+  if (!swayFrozen) {
+    const ellipse = computeSwayEllipse();
+    $('ss-sway').textContent = ellipse ? ellipse.area.toFixed(2) : '–';
+  }
 }());
 
 function clearVisuals() {
   FRAME_BUF.length = 0;
+  firstFrameSynced  = false;
+  deviceWallOffset  = 0;
+  bufferStartDevMs  = 0;
+  lastConsumedDevMs = 0;
   prevFrame = null; currFrame = null;
   trailHead = 0; trailFull = false;
   trailRoll.fill(0); trailPitch.fill(0);
   ['labels','roll','pitch','yaw'].forEach(k => { chartData[k].length = 0; });
   chartStart = 0;
   resetSwayAccumulator();
+  // Coming out of a frozen state, we need the accumulator to start fresh
+  // AND we need the displayed number to follow live samples again.
+  swayFrozen = false;
   $('ss-sway').textContent = '–';
   if (chart) chart.update('none');
   drawTiltPlot(lastRoll, lastPitch);
@@ -642,37 +729,30 @@ resizeCanvas();
 
 // ── Live update ────────────────────────────────────────────────────────────
 function updateLive(t, roll, pitch, yaw) {
-  // Push into jitter buffer; rAF loop reads from it with a lag
+  // Push into jitter buffer; rAF loop reads from it with JITTER_LAG.
+  // ALL visible state (dot, trail, chart, metric tiles, sway ellipse) is
+  // driven from the rAF loop's playback timeline so everything stays in sync.
+  //
+  // Each frame is tagged with TWO timestamps:
+  //   deviceMs : the ESP32's millis() when the sample was captured. Used
+  //              for playback timing so bursty arrivals (after a network
+  //              stall) play back at the original 50 Hz pace.
+  //   wallT    : performance.now() on the browser at arrival. Used only
+  //              for the Hz indicator and stall detection.
+  // Without deviceMs-based playback, a 1 s stall produces a 50-frame burst
+  // arriving within ~50 ms; the buffer would play it back at burst speed
+  // and the dashboard would visibly "fast-forward" through the stall.
   const wallT = performance.now();
-  FRAME_BUF.push({ roll, pitch, yaw, wallT });
+  FRAME_BUF.push({ roll, pitch, yaw, wallT, deviceMs: t });
   if (FRAME_BUF.length > FRAME_BUF_MAX) FRAME_BUF.shift();
   // Keep legacy refs so replay path still works
   prevFrame = currFrame;
   currFrame = { roll, pitch, wallT };
 
-  $('v-roll').textContent  = roll.toFixed(2);
-  $('v-pitch').textContent = pitch.toFixed(2);
-  $('v-yaw').textContent   = yaw.toFixed(2);
   const tilt = Math.sqrt(roll * roll + pitch * pitch);
-  $('v-tilt').textContent  = tilt.toFixed(2);
 
-  // Trail stores actual received samples (used only for the fading tail line)
-  trailRoll[trailHead]  = roll;
-  trailPitch[trailHead] = pitch;
-  trailHead = (trailHead + 1) % TRAIL_LEN;
-  if (trailHead === 0) trailFull = true;
-
-  // Session-wide sway ellipse: accumulate every sample since last reset
-  swayAccumulate(roll, pitch);
-  const ellipse = computeSwayEllipse();
-  $('ss-sway').textContent = ellipse ? ellipse.area.toFixed(2) : '–';
-
-  // Chart uses wall-clock elapsed from first frame, not from record start
-  if (!chartStart) chartStart = Date.now();
-  const elapsed = (Date.now() - chartStart) / 1000;
-  pushChartPoint(elapsed, roll, pitch, yaw);
-
-  // Hz via wall-clock receive deltas
+  // Hz via wall-clock receive deltas — measures actual link rate, not the
+  // displayed (lagged) rate, so it stays meaningful for diagnostics.
   const now = Date.now();
   sampleTimes.push(now);
   sampleTimes = sampleTimes.filter(ts => now - ts < 2000);
@@ -722,6 +802,7 @@ function connect() {
     log('Connected to ' + url, 'ok');
     initChart();
     resetSwayAccumulator();
+    swayFrozen = false;
     $('ss-sway').textContent = '–';
     // Opt into binary frames: 16 B vs ~30 B per frame, no snprintf cost on
     // the ESP32. The server falls back to text for any client that doesn't
@@ -842,7 +923,10 @@ function startRecording() {
   if (recording) return;
   csvRows = []; sampleCount = 0; peakTilt = 0; sumTilt = 0;
   swayPath = 0; prevRecRoll = null; prevRecPitch = null;
+  // Fresh session: reset the sway accumulator and unfreeze so live samples
+  // start contributing again.
   resetSwayAccumulator();
+  swayFrozen = false;
   $('ss-sway').textContent = '–';
   sessionStart = Date.now();
   recording = true;
@@ -869,6 +953,9 @@ function stopRecording() {
   $('btn-record').disabled = false;
   $('btn-stop').disabled   = true;
   if (connected) setStatus('connected');
+  // Freeze the sway area on whatever the final value was. The number and
+  // ellipse remain visible until the user starts a new session or hits Zero.
+  swayFrozen = true;
   if (!csvRows.length) { log('No data to save', 'warn'); return; }
   const hdr = 'timestamp,elapsed_s,device_ms,roll_deg,pitch_deg,yaw_deg\n';
   const blob = new Blob([hdr + csvRows.join('\n')], { type: 'text/csv' });
@@ -1072,9 +1159,31 @@ $('btn-disconnect').addEventListener('click', disconnect);
 $('btn-record').addEventListener('click', startRecording);
 $('btn-stop').addEventListener('click', stopRecording);
 $('btn-zero').addEventListener('click', () => {
+  // Send the firmware-side zero command (resets orientation reference on
+  // the ESP32) and reset every dashboard-side derived value so the user
+  // gets a true clean slate.
   sendCmd('ZERO');
+  // Stop any in-progress session — Zero is destructive and shouldn't run
+  // alongside a recording. The CSV up to this point is discarded.
+  if (recording) {
+    recording = false;
+    clearInterval(timerHandle);
+    csvRows = [];
+    $('btn-record').disabled = false;
+    $('btn-stop').disabled   = true;
+    if (connected) setStatus('connected');
+  }
+  // Clear the visual trail + tilt-plot + chart + jitter buffer + sway
+  // accumulator (also unfreezes sway so live samples resume contributing).
   clearVisuals();
-  log('Visual history cleared');
+  // Reset every session-stat tile back to "—".
+  resetSessionStats();
+  // Blank out the instantaneous metric tiles until the next frame arrives.
+  $('v-roll').textContent  = '–';
+  $('v-pitch').textContent = '–';
+  $('v-yaw').textContent   = '–';
+  $('v-tilt').textContent  = '–';
+  log('Zeroed — all metrics and visuals cleared');
 });
 
 $('host-input').addEventListener('keydown', (e) => {
@@ -1132,6 +1241,24 @@ bool WifiManager::begin() {
     }
 
     _startServer();
+
+    // Spawn the dedicated TX task. Pinned to core 1 (where the Arduino loop
+    // lives), priority 5 — above Arduino loop's 1, well below WiFi driver's
+    // ~23. Goal: when the Arduino loop task is briefly preempted, this
+    // task still gets CPU and keeps the broadcast flowing.
+    _wifiTxRun = true;
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        _txTaskTrampoline, "wifi_tx", 6144, this,
+        5,                       // priority
+        &_wifiTxHandle,
+        1                        // core 1
+    );
+    if (ok != pdPASS) {
+        Serial.println("[WiFi] FATAL: wifi_tx task creation failed");
+        _wifiTxRun = false;
+    } else {
+        Serial.println("[WiFi] wifi_tx task on core 1 at priority 5");
+    }
     return true;
 }
 
@@ -1261,148 +1388,77 @@ void WifiManager::poll() {
         return;
     }
 
-    if (_ws) {
-        uint32_t t0 = micros();
-        _ws->loop();
-        uint32_t d = micros() - t0;
-        if (d > _maxWsLoopUs) _maxWsLoopUs = d;
-        _totWsLoopUs += d;
-        _wsLoopCalls++;
-    }
-    {
-        uint32_t t0 = micros();
-        _pollHttp();
-        uint32_t d = micros() - t0;
-        if (d > _maxHttpPollUs) _maxHttpPollUs = d;
-    }
+    // NOTE: _ws->loop() and _pollHttp() are no longer called from here.
+    // They run on the dedicated wifi_tx task at priority 5 on core 1, so
+    // a momentary preemption of the Arduino loop task no longer stalls
+    // the broadcast. See _txTaskLoop() below.
 
     uint32_t now = millis();
 
     // Periodically push a fresh STATUS to connected clients so the dashboard
-    // info line (IP / RSSI / heap / ch) stays current. Cheap: ~200-byte text
-    // frame at 0.5 Hz.
-    if (_clientCount > 0) {
-        if (now - _lastStatusMs >= 2000) {
-            _lastStatusMs = now;
-            sendStatus();  // broadcast
-        }
+    // info pills (RSSI / heap) stay current. Cheap: ~200-byte text frame at 0.5 Hz.
+    if (_clientCount > 0 && now - _lastStatusMs >= 2000) {
+        _lastStatusMs = now;
+        sendStatus();
     }
 
-    // Per-second diagnostic line. Compare tx/s to the expected output rate
-    // (50 Hz default). Drops indicate the loop got stuck for that second.
-    // sample/s shows IMU sampling rate on core 0 — should be ~208 Hz.
+    // Once-per-second [STATS] diagnostic line on the serial monitor.
+    //   tx       — broadcast frames sent in the last second (expected ~50)
+    //   samples  — IMU samples published by the sensor task (expected ~190-200)
+    //   maxGap   — worst inter-send gap (expected ~21 ms; spikes = stalls)
+    //   heap/RSSI — basic health
     if (now - _lastStatsMs >= 1000) {
         extern volatile uint32_t g_sample_count;
-        extern volatile uint32_t g_max_update_us;
-        extern volatile uint32_t g_max_loopgap_us;
-        extern volatile uint32_t g_skipped_dt;
         static uint32_t last_samples = 0;
-        uint32_t samples_now = g_sample_count;
+        uint32_t samples_now   = g_sample_count;
         uint32_t samples_delta = samples_now - last_samples;
         last_samples = samples_now;
 
-        uint32_t imu_update_us = g_max_update_us;
-        uint32_t imu_loopgap_us = g_max_loopgap_us;
-        uint32_t imu_skipped    = g_skipped_dt;
-        g_max_update_us  = 0;
-        g_max_loopgap_us = 0;
-        g_skipped_dt     = 0;
-
-        uint32_t avgWsLoopUs = _wsLoopCalls ? (_totWsLoopUs / _wsLoopCalls) : 0;
-
-        Serial.printf("[STATS] tx=%lu/s drop=%lu rx=%lu/s samples=%lu/s maxGap=%lums "
-                      "send=%luus wsLoop=max%luus,avg%luus http=%luus "
-                      "imuUpd=%luus imuGap=%luus dtSkip=%lu "
-                      "heap=%luKB rssi=%d clients=%d\n",
+        Serial.printf("[STATS] tx=%lu/s samples=%lu/s maxGap=%lums heap=%luKB rssi=%d clients=%d\n",
                       (unsigned long)_txFrames,
-                      (unsigned long)_droppedFrames,
-                      (unsigned long)_rxMsgs,
                       (unsigned long)samples_delta,
                       (unsigned long)_maxGapMs,
-                      (unsigned long)_maxSendFrameUs,
-                      (unsigned long)_maxWsLoopUs,
-                      (unsigned long)avgWsLoopUs,
-                      (unsigned long)_maxHttpPollUs,
-                      (unsigned long)imu_update_us,
-                      (unsigned long)imu_loopgap_us,
-                      (unsigned long)imu_skipped,
                       (unsigned long)(ESP.getFreeHeap() / 1024),
                       WiFi.RSSI(),
                       (int)_clientCount);
 
-        // Focused stall report when something held the broadcast loop > 200 ms.
-        // Breakdown maps to root cause:
-        //   imuUpd / imuGap large → I2C bus stalled (vibration / loose wires)
-        //   send / wsLoop large  → TCP / WS library blocked (network layer)
-        //   http large           → a synchronous HTTP request was slow
-        //   All small but maxGap big → loop task preempted by WiFi driver
-        if (_maxGapMs > 200) {
-            const char* hint = "loop preempted (WiFi driver / lwIP timer)";
-            if (imu_update_us > 100000 || imu_loopgap_us > 100000) {
-                hint = "I2C BUS STALL — check IMU wiring / vibration";
-            } else if (_maxSendFrameUs > 100000 || _maxWsLoopUs > 100000) {
-                hint = "WS/TCP stall — network layer";
-            } else if (_maxHttpPollUs > 100000) {
-                hint = "HTTP request stall";
-            }
-            // Cross-core test: if imu_loopgap on core 0 stayed normal during
-            // the stall, the preemption was core-1-local (lwIP, async helpers,
-            // mDNS responder reply). If imu_loopgap also spiked, both cores
-            // froze — points at the WiFi driver, which can pause both cores
-            // during association recovery or channel work.
-            const char* scope = (imu_loopgap_us > 50000)
-                ? "BOTH CORES froze (WiFi driver / global lock)"
-                : "core-1 only (lwIP / WS / mDNS reply on core 1)";
-            Serial.printf("[STALL] maxGap=%lums  send=%luus wsLoop=%luus http=%luus "
-                          "imuUpd=%luus imuGap=%luus  → %s   [%s]\n",
-                          (unsigned long)_maxGapMs,
-                          (unsigned long)_maxSendFrameUs,
-                          (unsigned long)_maxWsLoopUs,
-                          (unsigned long)_maxHttpPollUs,
-                          (unsigned long)imu_update_us,
-                          (unsigned long)imu_loopgap_us,
-                          hint,
-                          scope);
-        }
-
-        _txFrames        = 0;
-        _droppedFrames   = 0;
-        _rxMsgs          = 0;
-        _maxGapMs        = 0;
-        _maxSendFrameUs  = 0;
-        _maxWsLoopUs     = 0;
-        _maxHttpPollUs   = 0;
-        _totWsLoopUs     = 0;
-        _wsLoopCalls     = 0;
-        _lastStatsMs     = now;
+        _txFrames    = 0;
+        _maxGapMs    = 0;
+        _lastStatsMs = now;
     }
 }
 
+// Producer side. Called from the Arduino loop task at 50 Hz.
+// Just publishes to a one-slot snapshot via seqlock — never calls into the
+// WS library, so the producer task cannot be blocked by network I/O.
+// The actual broadcast happens on the dedicated wifi_tx task (see below).
 void WifiManager::sendFrame(uint32_t ms, float roll, float pitch, float yaw) {
-    if (!_wifiOk || !_ws || _clientCount <= 0) return;
+    if (!_wifiOk || !_ws) return;
 
-    uint32_t now = millis();
+    uint32_t seq = _txSnapSeq.load(std::memory_order_relaxed);
+    _txSnapSeq.store(seq + 1, std::memory_order_release);  // odd: writing
+    _txSnap.ms    = ms;
+    _txSnap.roll  = roll;
+    _txSnap.pitch = pitch;
+    _txSnap.yaw   = yaw;
+    _txSnapSeq.store(seq + 2, std::memory_order_release);  // even: stable
+    _txSnapPubCount.fetch_add(1, std::memory_order_release);
+}
 
-    // Send-watchdog: if a recent send was slow, skip new sends for COOLOFF_MS
-    // so the TCP socket buffer can drain. Without this, the client can hold
-    // us in a slow loop of barely-recovering writes.
-    if (now < _coolOffUntilMs) {
-        _droppedFrames++;
-        return;
-    }
+// Actual broadcast — runs only on the wifi_tx task.
+void WifiManager::_broadcastSnapshot(const TxSnapshot& s) {
+    if (_clientCount <= 0) return;
 
-    // Track inter-send gap. A long gap here = the broadcast loop got stuck
-    // somewhere between the previous frame and this one.
+    // Track inter-send gap for the [STATS] line (measured from the perspective
+    // of frames actually leaving the device, not frames produced).
+    uint32_t nowMs = millis();
     if (_lastTxMs != 0) {
-        uint32_t gap = now - _lastTxMs;
+        uint32_t gap = nowMs - _lastTxMs;
         if (gap > _maxGapMs) _maxGapMs = gap;
     }
-    _lastTxMs = now;
-    uint32_t sendStartUs = micros();
+    _lastTxMs = nowMs;
 
-    // Tally the connected clients' mode preferences. Common case: one browser
-    // tab in BIN mode → single broadcastBIN call. Mixed mode falls back to
-    // per-client sends.
+    // Tally the connected clients' mode preferences.
     uint8_t n_bin = 0, n_txt = 0;
     for (uint8_t i = 0; i < MAX_WS_CLIENTS; i++) {
         if (!_ws->clientIsConnected(i)) continue;
@@ -1411,34 +1467,26 @@ void WifiManager::sendFrame(uint32_t ms, float roll, float pitch, float yaw) {
     }
     if (n_bin == 0 && n_txt == 0) return;
 
-    // Binary frame: 16 bytes little-endian (ESP32 native). Layout:
-    //   [0..3]   uint32  ms
-    //   [4..7]   float32 roll
-    //   [8..11]  float32 pitch
-    //   [12..15] float32 yaw
+    // Binary frame: 16 bytes little-endian.
     uint8_t bin[16];
-    memcpy(bin + 0,  &ms,    4);
-    memcpy(bin + 4,  &roll,  4);
-    memcpy(bin + 8,  &pitch, 4);
-    memcpy(bin + 12, &yaw,   4);
+    memcpy(bin + 0,  &s.ms,    4);
+    memcpy(bin + 4,  &s.roll,  4);
+    memcpy(bin + 8,  &s.pitch, 4);
+    memcpy(bin + 12, &s.yaw,   4);
 
     // Text frame (legacy / default): CSV. Built only if needed.
     char txt[64];
     int  txt_len = 0;
     if (n_txt > 0) {
         txt_len = snprintf(txt, sizeof(txt), "%lu,%.2f,%.2f,%.2f",
-                           (unsigned long)ms, roll, pitch, yaw);
+                           (unsigned long)s.ms, s.roll, s.pitch, s.yaw);
     }
 
-    // Fast paths: all-binary or all-text → single library broadcast call.
     if (n_bin > 0 && n_txt == 0) {
         _ws->broadcastBIN(bin, sizeof(bin));
-        _txFrames++;
     } else if (n_txt > 0 && n_bin == 0) {
         if (txt_len > 0) _ws->broadcastTXT((uint8_t*)txt, (size_t)txt_len);
-        _txFrames++;
     } else {
-        // Mixed mode: fan out per client.
         for (uint8_t i = 0; i < MAX_WS_CLIENTS; i++) {
             if (!_ws->clientIsConnected(i)) continue;
             if (_binMode[i]) {
@@ -1447,18 +1495,52 @@ void WifiManager::sendFrame(uint32_t ms, float roll, float pitch, float yaw) {
                 _ws->sendTXT(i, (uint8_t*)txt, (size_t)txt_len);
             }
         }
-        _txFrames++;
     }
+    _txFrames++;
+}
 
-    uint32_t durUs = micros() - sendStartUs;
-    if (durUs > _maxSendFrameUs) _maxSendFrameUs = durUs;
+// Trampoline so we can call a member function from xTaskCreatePinnedToCore.
+void WifiManager::_txTaskTrampoline(void* arg) {
+    static_cast<WifiManager*>(arg)->_txTaskLoop();
+}
 
-    // If this send was slow, the client is congested — back off and let TCP
-    // drain. WEBSOCKETS_TCP_TIMEOUT caps the worst single-send wait, but if
-    // we hit it once, the next attempt is likely to hit it again immediately.
-    if (durUs >= SLOW_SEND_US) {
-        _coolOffUntilMs = millis() + COOLOFF_MS;
+// The dedicated TX task. Runs on core 1 at priority 5 — higher than the
+// Arduino loop task (prio 1), well below the WiFi driver task (prio 23).
+// This means brief preemption of the Arduino loop doesn't starve our
+// broadcast: this task still gets scheduled and keeps frames flowing.
+void WifiManager::_txTaskLoop() {
+    while (_wifiTxRun) {
+        // Service incoming WS housekeeping (handshake, ping/pong, etc.)
+        if (_ws) _ws->loop();
+        // Handle any pending HTTP request for the dashboard HTML.
+        _pollHttp();
+
+        // Pop the latest published snapshot if we haven't sent it yet.
+        // Using a publish-counter ensures we don't re-send the same frame
+        // and also that we don't drop frames silently (the producer always
+        // overwrites the previous snapshot; we just take whatever is freshest).
+        uint32_t pub = _txSnapPubCount.load(std::memory_order_acquire);
+        if (pub != _txSnapLastSent) {
+            // Consistent read via seqlock.
+            TxSnapshot local{};
+            for (int tries = 0; tries < 4; tries++) {
+                uint32_t s1 = _txSnapSeq.load(std::memory_order_acquire);
+                if (s1 & 1) continue;
+                local = _txSnap;
+                uint32_t s2 = _txSnapSeq.load(std::memory_order_acquire);
+                if (s1 == s2) { _txSnapLastSent = pub; break; }
+            }
+            if (_txSnapLastSent == pub) {
+                _broadcastSnapshot(local);
+            }
+        }
+
+        // Yield. 1 tick = 1 ms — fast enough to keep _ws->loop responsive
+        // (which the library expects to be called often).
+        vTaskDelay(1);
     }
+    _wifiTxHandle = nullptr;
+    vTaskDelete(nullptr);
 }
 
 void WifiManager::_pollHttp() {
@@ -1565,7 +1647,6 @@ void WifiManager::_onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t 
 
         case WStype_TEXT: {
             if (!payload || length == 0) break;
-            _rxMsgs++;
             char cmd[32] = {};
             size_t n = length < sizeof(cmd) - 1 ? length : sizeof(cmd) - 1;
             memcpy(cmd, payload, n);

@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include "config.h"
 #include <WebSocketsServer.h>
+#include <atomic>
 
 class SerialCommand;
 
@@ -38,33 +39,40 @@ private:
     uint32_t _lastReconnectMs      = 0;
     uint32_t _lastStatusMs         = 0;
 
-    // Per-second stats counters. Reset every 1 s when printing.
-    uint32_t _txFrames             = 0;  // frames sent over WS
-    uint32_t _rxMsgs               = 0;  // text messages received
+    // Diagnostics for the once-per-second [STATS] line.
+    uint32_t _txFrames             = 0;  // frames sent over WS in the last second
+    uint32_t _lastTxMs             = 0;  // millis() of the previous sendFrame()
+    uint32_t _maxGapMs             = 0;  // largest inter-send gap in the last second
     uint32_t _lastStatsMs          = 0;
-    uint32_t _lastTxMs             = 0;  // millis() at last sendFrame()
-    uint32_t _maxGapMs             = 0;  // worst send-to-send gap in last second
-
-    // Stall-attribution counters. All in microseconds, reset each second.
-    uint32_t _maxSendFrameUs       = 0;  // worst single sendFrame() duration
-    uint32_t _maxWsLoopUs          = 0;  // worst single _ws->loop() duration
-    uint32_t _maxHttpPollUs        = 0;  // worst single _pollHttp() duration
-    uint32_t _totWsLoopUs          = 0;  // cumulative _ws->loop() time
-    uint32_t _wsLoopCalls          = 0;
-    uint32_t _droppedFrames        = 0;  // frames skipped due to slow client / TCP backpressure
-
-    // Send-watchdog: after a slow send (>SLOW_SEND_US), skip frames for a
-    // cool-off period so the TCP send buffer can drain without blocking.
-    static constexpr uint32_t SLOW_SEND_US  = 30000;   // 30 ms — anything over this is "stalled"
-    static constexpr uint32_t COOLOFF_MS    = 100;     // drop frames for this long after a slow send
-    uint32_t _coolOffUntilMs       = 0;
 
     // Per-client: send frames as binary (16-byte little-endian struct) when true,
     // text CSV when false. Toggled by the client sending "BIN ON" / "BIN OFF".
     bool _binMode[MAX_WS_CLIENTS]  = { false };
 
+    // ── Dedicated TX task ────────────────────────────────────────────────
+    // sendFrame() is called from the Arduino loop task. Instead of writing
+    // to the WS library inline (which puts the WS work on the same task
+    // that can be preempted by WiFi driver bookkeeping), it publishes the
+    // latest sample to a one-slot snapshot. A dedicated FreeRTOS task at
+    // priority 5 on core 1 drains that snapshot at 50 Hz and runs the
+    // WS library's loop continuously. Higher priority than Arduino loop
+    // (prio 1) means this task gets CPU even when the loop is starving.
+    struct TxSnapshot {
+        uint32_t ms;
+        float    roll, pitch, yaw;
+    };
+    TxSnapshot              _txSnap        = {};
+    std::atomic<uint32_t>   _txSnapSeq{0};   // even = stable, odd = writing
+    std::atomic<uint32_t>   _txSnapPubCount{0};   // incremented per publish
+    uint32_t                _txSnapLastSent  = 0; // pub-count last consumed
+    volatile bool           _wifiTxRun       = false;
+    TaskHandle_t            _wifiTxHandle    = nullptr;
+
     bool _tryConnect();
     void _startServer();
     void _onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
     void _pollHttp();
+    void _txTaskLoop();
+    static void _txTaskTrampoline(void* arg);
+    void _broadcastSnapshot(const TxSnapshot& s);
 };
