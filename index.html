@@ -64,7 +64,7 @@ button:disabled { opacity: .3; cursor: not-allowed; }
 
 .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
 
-.metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin-bottom: 10px; }
+.metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-bottom: 10px; }
 @media (max-width: 600px) { .metrics { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 .metric { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 12px 14px; }
 .m-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
@@ -128,11 +128,6 @@ button:disabled { opacity: .3; cursor: not-allowed; }
     <div class="metric">
       <div class="m-label"><span class="m-tag" style="background:#4ade80"></span>Pitch</div>
       <div class="m-val" style="color:#4ade80" id="v-pitch">–</div>
-      <div class="m-unit">degrees</div>
-    </div>
-    <div class="metric">
-      <div class="m-label"><span class="m-tag" style="background:var(--amber)"></span>Yaw</div>
-      <div class="m-val" style="color:var(--amber)" id="v-yaw">–</div>
       <div class="m-unit">degrees</div>
     </div>
     <div class="metric">
@@ -281,7 +276,7 @@ async function sendCmd(text) {
 const PENDING_FRAMES = [];
 let firstDeviceMs    = 0;
 let haveFirstDeviceMs = false;
-let lastRoll = 0, lastPitch = 0, lastYaw = 0;
+let lastRoll = 0, lastPitch = 0;
 
 function onAngles(evt) {
   const dv = evt.target.value;
@@ -574,11 +569,11 @@ function resetAllVisualsAndAccumulators() {
   // Tile values.
   ['ss-n','ss-dur','ss-peak','ss-avg','ss-path','ss-vel','ss-sway']
     .forEach(id => $(id).textContent = '–');
-  ['v-roll','v-pitch','v-yaw','v-tilt']
+  ['v-roll','v-pitch','v-tilt']
     .forEach(id => $(id).textContent = '–');
   // Chart.
   if (chart) {
-    ['labels','roll','pitch','yaw'].forEach(k => { chartData[k].length = 0; });
+    ['labels','roll','pitch'].forEach(k => { chartData[k].length = 0; });
     chartDirty = true;
   }
   lastRoll = 0; lastPitch = 0;
@@ -589,7 +584,7 @@ function resetAllVisualsAndAccumulators() {
 // Chart.js tilt-vs-time, 20 Hz redraw cap.
 // ───────────────────────────────────────────────────────────────────────────
 const MAX_CHART = 250;             // ~5 s at 50 Hz
-const chartData = { labels: [], roll: [], pitch: [], yaw: [] };
+const chartData = { labels: [], roll: [], pitch: [] };
 let   chart      = null;
 let   chartDirty = false;
 let   chartLastDrawMs = 0;
@@ -603,7 +598,6 @@ function initChart() {
       datasets: [
         { label: 'Roll',  data: chartData.roll,  borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: .3 },
         { label: 'Pitch', data: chartData.pitch, borderColor: '#4ade80', borderWidth: 1.5, pointRadius: 0, tension: .3 },
-        { label: 'Yaw',   data: chartData.yaw,   borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, tension: .3 },
       ]
     },
     options: {
@@ -620,14 +614,13 @@ function initChart() {
 }
 initChart();
 
-function pushChartPoint(elapsed, roll, pitch, yaw) {
+function pushChartPoint(elapsed, roll, pitch) {
   chartData.labels.push(elapsed.toFixed(1) + 's');
   chartData.roll  .push(roll);
   chartData.pitch .push(pitch);
-  chartData.yaw   .push(yaw);
   if (chartData.labels.length > MAX_CHART) {
     chartData.labels.shift();
-    chartData.roll .shift(); chartData.pitch.shift(); chartData.yaw.shift();
+    chartData.roll .shift(); chartData.pitch.shift();
   }
   chartDirty = true;
 }
@@ -661,7 +654,7 @@ function pushChartPoint(elapsed, roll, pitch, yaw) {
     }
 
     // Latest values feed the live tiles + tilt-plot dot.
-    lastRoll = f.roll; lastPitch = f.pitch; lastYaw = f.yaw;
+    lastRoll = f.roll; lastPitch = f.pitch;
 
     // Fading trail — visual-only, regardless of recording state.
     trailRoll[trailHead]  = f.roll;
@@ -671,7 +664,7 @@ function pushChartPoint(elapsed, roll, pitch, yaw) {
 
     // Time-series chart — always live.
     const elapsedDevS = (f.deviceMs - firstDeviceMs) / 1000;
-    pushChartPoint(elapsedDevS, f.roll, f.pitch, f.yaw);
+    pushChartPoint(elapsedDevS, f.roll, f.pitch);
 
     // Session aggregates — only while recording, frozen on Stop.
     if (recording && !swayFrozen) {
@@ -704,7 +697,6 @@ function pushChartPoint(elapsed, roll, pitch, yaw) {
   const tilt = Math.hypot(lastRoll, lastPitch);
   $('v-roll') .textContent = lastRoll .toFixed(2);
   $('v-pitch').textContent = lastPitch.toFixed(2);
-  $('v-yaw')  .textContent = lastYaw  .toFixed(2);
   $('v-tilt') .textContent = tilt     .toFixed(2);
 
   // Session-metric tiles — refresh while recording so the user sees them grow.
