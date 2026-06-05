@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMU Balance Board — BLE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+:root {
+  --bg:       #0f0f12;
+  --bg2:      #18181d;
+  --bg3:      #23232a;
+  --bg4:      #2a2a32;
+  --border:   rgba(255,255,255,.10);
+  --border2:  rgba(255,255,255,.14);
+  --text:     #f5f5f7;
+  --text2:    #a1a1a6;
+  --text3:    #55555c;
+  --green:    #4ade80;
+  --red:      #f87171;
+  --amber:    #fbbf24;
+  --green-bg: rgba(74,222,128,.1);
+  --red-bg:   rgba(248,113,113,.1);
+  --amber-bg: rgba(251,191,36,.1);
+  --blue:     #60a5fa;
+  --blue-bg:  rgba(96,165,250,.1);
+  --r:        6px;
+  --r2:       10px;
+  --font:     'IBM Plex Sans', sans-serif;
+  --mono:     'IBM Plex Mono', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+body { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+
+.header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+.header h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em; }
+.header-sub { font-size: 12px; color: var(--text3); font-family: var(--mono); }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500;
+        padding: 4px 10px; border-radius: 20px; background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex-shrink: 0; }
+.dot.on  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.rec { background: var(--red); animation: blink 1s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+button { font-family: var(--font); font-size: 13px; font-weight: 500; padding: 7px 14px;
+          border-radius: var(--r); border: 1px solid var(--border2); background: var(--bg3);
+          color: var(--text); cursor: pointer; transition: background .15s, opacity .15s; }
+button:hover { background: var(--bg4); }
+button:active { opacity: .75; }
+button:disabled { opacity: .3; cursor: not-allowed; }
+.btn-green { background: var(--green-bg); border-color: rgba(74,222,128,.3); color: var(--green); }
+.btn-green:hover { background: rgba(74,222,128,.18); }
+.btn-red   { background: var(--red-bg);   border-color: rgba(248,113,113,.3); color: var(--red); }
+.btn-red:hover   { background: rgba(248,113,113,.18); }
+.btn-amber { background: var(--amber-bg); border-color: rgba(251,191,36,.3);  color: var(--amber); }
+.btn-amber:hover { background: rgba(251,191,36,.18); }
+
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--text3); margin-bottom: 10px; }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+
+.metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-bottom: 10px; }
+@media (max-width: 600px) { .metrics { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+.metric { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 12px 14px; }
+.m-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.m-tag { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.m-val  { font-size: 24px; font-weight: 500; font-family: var(--mono); line-height: 1; }
+.m-unit { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-top: 3px; }
+
+.tilt-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+#tiltCanvas { display: block; border-radius: var(--r); background: var(--bg3); border: 1px solid var(--border); }
+.scale-row { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text2); align-self: stretch; justify-content: center; }
+.scale-row input[type=range] { accent-color: var(--blue); }
+.scale-row button { font-size: 12px; padding: 4px 9px; }
+
+.chart-wrap { position: relative; height: 180px; }
+
+.session-stats { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin-bottom: 12px; }
+@media (max-width: 600px) { .session-stats { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+.ss-item { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 12px 14px; }
+.ss-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); margin-bottom: 6px; }
+.ss-val { font-size: 22px; font-weight: 500; font-family: var(--mono); line-height: 1; color: var(--text); }
+.ss-unit { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-top: 3px; }
+
+.log { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r);
+       height: 110px; overflow-y: auto; padding: 6px 10px; font-family: var(--mono); font-size: 11px; color: var(--text3); }
+.log-line { padding: 1px 0; }
+.log-ok   { color: var(--green); }
+.log-warn { color: var(--amber); }
+.log-err  { color: var(--red); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>IMU Balance Board <span class="header-sub">— MG24 / BLE</span></h1>
+  <div class="spacer"></div>
+  <span class="pill" id="conn-pill">
+    <span class="dot" id="conn-dot"></span>
+    <span id="conn-text">disconnected</span>
+  </span>
+</div>
+
+<div class="card">
+  <div class="card-title">Controls</div>
+  <div class="controls">
+    <button id="btn-connect"    class="btn-green">Connect</button>
+    <button id="btn-disconnect" class="btn-red"   disabled>Disconnect</button>
+    <button id="btn-record"     disabled>Start session</button>
+    <button id="btn-stop"       class="btn-red" disabled>Stop &amp; save CSV</button>
+    <button id="btn-zero"       class="btn-amber" disabled>Zero</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Live</div>
+  <div class="metrics">
+    <div class="metric">
+      <div class="m-label"><span class="m-tag" style="background:#60a5fa"></span>Roll</div>
+      <div class="m-val" style="color:#60a5fa" id="v-roll">–</div>
+      <div class="m-unit">degrees</div>
+    </div>
+    <div class="metric">
+      <div class="m-label"><span class="m-tag" style="background:#4ade80"></span>Pitch</div>
+      <div class="m-val" style="color:#4ade80" id="v-pitch">–</div>
+      <div class="m-unit">degrees</div>
+    </div>
+    <div class="metric">
+      <div class="m-label"><span class="m-tag" style="background:var(--text2)"></span>Tilt</div>
+      <div class="m-val" id="v-tilt">–</div>
+      <div class="m-unit">√(roll²+pitch²) °</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Tilt plot</div>
+  <div class="tilt-wrap">
+    <canvas id="tiltCanvas" width="460" height="460"></canvas>
+    <div class="scale-row">
+      <button id="zoom-out" title="Zoom out">−</button>
+      <span>Scale:</span>
+      <input type="range" id="max-angle-slider" min="5" max="90" value="30" step="5" style="width:160px">
+      <span id="max-angle-label">±30°</span>
+      <button id="zoom-in" title="Zoom in">+</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Tilt vs time</div>
+  <div class="chart-wrap"><canvas id="timeChart"></canvas></div>
+</div>
+
+<div class="card">
+  <div class="card-title">Session metrics</div>
+  <div class="session-stats">
+    <div class="ss-item"><div class="ss-label">Samples</div>      <div class="ss-val" id="ss-n">–</div>   <div class="ss-unit">count</div></div>
+    <div class="ss-item"><div class="ss-label">Duration</div>     <div class="ss-val" id="ss-dur">–</div> <div class="ss-unit">mm:ss</div></div>
+    <div class="ss-item"><div class="ss-label">Max tilt</div>     <div class="ss-val" id="ss-peak">–</div><div class="ss-unit">degrees</div></div>
+    <div class="ss-item"><div class="ss-label">Avg tilt</div>     <div class="ss-val" id="ss-avg">–</div> <div class="ss-unit">degrees</div></div>
+    <div class="ss-item"><div class="ss-label">Sway path</div>    <div class="ss-val" id="ss-path">–</div><div class="ss-unit">degrees</div></div>
+    <div class="ss-item"><div class="ss-label">Mean velocity</div><div class="ss-val" id="ss-vel">–</div> <div class="ss-unit">°/s</div></div>
+    <div class="ss-item"><div class="ss-label">Sway area</div>    <div class="ss-val" id="ss-sway">–</div><div class="ss-unit">°²</div></div>
+    <div class="ss-item"><div class="ss-label">Status</div>       <div class="ss-val" id="ss-state" style="font-size:14px;color:var(--text2);">idle</div><div class="ss-unit">&nbsp;</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Log</div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+// ───────────────────────────────────────────────────────────────────────────
+// BLE UUIDs — must match config.h on the firmware.
+// ───────────────────────────────────────────────────────────────────────────
+const SVC_UUID    = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const ANGLES_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const CMD_UUID    = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+// ── DOM helpers ────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+
+function log(msg, cls = '') {
+  const line = document.createElement('div');
+  line.className = 'log-line ' + (cls ? 'log-' + cls : '');
+  const ts = new Date().toLocaleTimeString();
+  line.textContent = `[${ts}] ${msg}`;
+  $('log').appendChild(line);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// BLE state.
+// ───────────────────────────────────────────────────────────────────────────
+let device     = null;
+let anglesChar = null;
+let cmdChar    = null;
+let connected  = false;
+
+function setConnected(yes) {
+  connected = yes;
+  $('conn-dot').className  = yes ? 'dot on' : 'dot';
+  $('conn-text').textContent = yes ? 'connected' : 'disconnected';
+  $('btn-connect').disabled    = yes;
+  $('btn-disconnect').disabled = !yes;
+  $('btn-record').disabled     = !yes;
+  $('btn-zero').disabled       = !yes;
+  // Stop button is only enabled while recording — handled separately.
+}
+
+if (!navigator.bluetooth) {
+  log('Web Bluetooth not available. Open this page in Chrome or Edge.', 'err');
+  $('btn-connect').disabled = true;
+}
+
+$('btn-connect').addEventListener('click', async () => {
+  try {
+    log('Requesting device…');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SVC_UUID] }],
+      optionalServices: [SVC_UUID],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    log('Connecting…');
+    const server = await device.gatt.connect();
+    const svc    = await server.getPrimaryService(SVC_UUID);
+    anglesChar   = await svc.getCharacteristic(ANGLES_UUID);
+    cmdChar      = await svc.getCharacteristic(CMD_UUID);
+    await anglesChar.startNotifications();
+    anglesChar.addEventListener('characteristicvaluechanged', onAngles);
+    setConnected(true);
+    resetAllVisualsAndAccumulators();
+    log('Connected. Streaming.', 'ok');
+  } catch (e) {
+    log('Connect failed: ' + e.message, 'err');
+    setConnected(false);
+  }
+});
+
+$('btn-disconnect').addEventListener('click', () => {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+});
+
+function onDisconnected() {
+  setConnected(false);
+  if (recording) stopRecording();
+  log('Disconnected.', 'warn');
+}
+
+async function sendCmd(text) {
+  if (!cmdChar) return;
+  try {
+    const buf = new TextEncoder().encode(text);
+    await cmdChar.writeValueWithoutResponse(buf);
+    log('→ ' + text);
+  } catch (e) {
+    log('Command failed: ' + e.message, 'err');
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Frame unpacking. The firmware emits a 16-byte LE struct
+// (uint32 ms + 3× float32). On a local BLE notify link jitter is tiny, so
+// we skip the device-time playhead the ESP32 WiFi dashboard used (that
+// version dealt with WebSocket bursts after WiFi stalls) and just process
+// every notification directly. PENDING_FRAMES collects everything that
+// arrived since the last rAF tick so the rAF loop can drain them in order.
+// ───────────────────────────────────────────────────────────────────────────
+const PENDING_FRAMES = [];
+let firstDeviceMs    = 0;
+let haveFirstDeviceMs = false;
+let lastRoll = 0, lastPitch = 0;
+
+function onAngles(evt) {
+  const dv = evt.target.value;
+  if (dv.byteLength < 16) return;
+  const ms    = dv.getUint32 (0,  true);
+  const roll  = dv.getFloat32(4,  true);
+  const pitch = dv.getFloat32(8,  true);
+  const yaw   = dv.getFloat32(12, true);
+  PENDING_FRAMES.push({ deviceMs: ms, roll, pitch, yaw });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tilt plot — canvas with concentric scale rings, sway ellipse, fading trail,
+// and the current-position dot. Zoom range from ±5° to ±90°.
+// ───────────────────────────────────────────────────────────────────────────
+const tiltCanvas = $('tiltCanvas');
+const tiltCtx    = tiltCanvas.getContext('2d');
+let   maxAngle   = 30;
+
+const TRAIL_LEN  = 600;        // ~12 s at 50 Hz
+const trailRoll  = new Float32Array(TRAIL_LEN);
+const trailPitch = new Float32Array(TRAIL_LEN);
+let   trailHead  = 0;
+let   trailFull  = false;
+
+function clampToCircle(r, p, maxA) {
+  const m = Math.hypot(r, p);
+  if (m <= maxA || m === 0) return [r, p];
+  const s = maxA / m;
+  return [r * s, p * s];
+}
+
+function drawTiltPlot(roll, pitch) {
+  const W = tiltCanvas.width, H = tiltCanvas.height;
+  const cx = W / 2, cy = H / 2;
+  const radius = Math.min(W, H) / 2 - 32;
+  const scale  = radius / maxAngle;
+
+  tiltCtx.clearRect(0, 0, W, H);
+  tiltCtx.fillStyle = '#161618';
+  tiltCtx.beginPath(); tiltCtx.arc(cx, cy, radius, 0, Math.PI * 2); tiltCtx.fill();
+
+  const rings = [1, 2, 5, 10, 15, 20, 30, 45, 60, 90].filter(r => r <= maxAngle);
+  tiltCtx.font = '9px IBM Plex Mono, monospace';
+  tiltCtx.textAlign = 'center';
+  for (const r of rings) {
+    const rPx = r * scale;
+    tiltCtx.beginPath(); tiltCtx.arc(cx, cy, rPx, 0, Math.PI * 2);
+    tiltCtx.strokeStyle = r % 10 === 0 ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.05)';
+    tiltCtx.lineWidth = 1; tiltCtx.stroke();
+    tiltCtx.fillStyle = 'rgba(255,255,255,0.22)';
+    tiltCtx.fillText(`${r}°`, cx, cy - rPx + 11);
+  }
+
+  tiltCtx.save();
+  tiltCtx.beginPath(); tiltCtx.arc(cx, cy, radius, 0, Math.PI * 2); tiltCtx.clip();
+
+  tiltCtx.strokeStyle = 'rgba(255,255,255,0.14)'; tiltCtx.lineWidth = 1;
+  tiltCtx.setLineDash([4, 5]);
+  tiltCtx.beginPath(); tiltCtx.moveTo(cx - radius, cy); tiltCtx.lineTo(cx + radius, cy); tiltCtx.stroke();
+  tiltCtx.beginPath(); tiltCtx.moveTo(cx, cy - radius); tiltCtx.lineTo(cx, cy + radius); tiltCtx.stroke();
+  tiltCtx.setLineDash([]);
+
+  const ellipse = computeSwayEllipse();
+  if (ellipse) {
+    const ex = cx + ellipse.cx * scale, ey = cy - ellipse.cy * scale;
+    const aR = ellipse.semiA * scale, bR = ellipse.semiB * scale;
+    const early = swayN < 20;
+    tiltCtx.save();
+    tiltCtx.translate(ex, ey); tiltCtx.rotate(-ellipse.angle);
+    tiltCtx.beginPath(); tiltCtx.ellipse(0, 0, Math.max(aR, 1), Math.max(bR, 1), 0, 0, Math.PI * 2);
+    tiltCtx.fillStyle   = early ? 'rgba(251,191,36,0.05)' : 'rgba(251,191,36,0.10)';
+    tiltCtx.fill();
+    tiltCtx.strokeStyle = early ? 'rgba(251,191,36,0.35)' : 'rgba(251,191,36,0.70)';
+    tiltCtx.lineWidth   = 1.5;
+    tiltCtx.setLineDash(early ? [4, 4] : []);
+    tiltCtx.stroke(); tiltCtx.setLineDash([]);
+    tiltCtx.restore();
+  }
+
+  const N = trailFull ? TRAIL_LEN : trailHead;
+  if (N > 1) {
+    const BANDS = 8, bandSize = Math.ceil((N - 1) / BANDS);
+    for (let b = 0; b < BANDS; b++) {
+      const s = b * bandSize, e = Math.min(s + bandSize, N - 1);
+      if (s >= e) break;
+      const t = (s + e) / 2 / Math.max(N - 2, 1);
+      tiltCtx.beginPath();
+      const i0 = trailFull ? (trailHead + s) % TRAIL_LEN : s;
+      const [r0, p0] = clampToCircle(trailRoll[i0], trailPitch[i0], maxAngle);
+      tiltCtx.moveTo(cx + r0 * scale, cy - p0 * scale);
+      for (let i = s + 1; i <= e; i++) {
+        const idx = trailFull ? (trailHead + i) % TRAIL_LEN : i;
+        const [rc, pc] = clampToCircle(trailRoll[idx], trailPitch[idx], maxAngle);
+        tiltCtx.lineTo(cx + rc * scale, cy - pc * scale);
+      }
+      tiltCtx.strokeStyle = `rgba(148,163,184,${(0.10 + 0.62 * t).toFixed(2)})`;
+      tiltCtx.lineWidth   = 0.8 + 1.4 * t;
+      tiltCtx.lineJoin = tiltCtx.lineCap = 'round';
+      tiltCtx.stroke();
+    }
+  }
+
+  const [cr, cp] = clampToCircle(roll, pitch, maxAngle);
+  const dx = cx + cr * scale, dy = cy - cp * scale;
+  tiltCtx.beginPath(); tiltCtx.arc(dx, dy, 14, 0, Math.PI * 2);
+  tiltCtx.fillStyle = 'rgba(74,222,128,0.12)'; tiltCtx.fill();
+  tiltCtx.beginPath(); tiltCtx.arc(dx, dy, 6, 0, Math.PI * 2);
+  tiltCtx.fillStyle = '#4ade80';
+  tiltCtx.shadowColor = '#4ade80'; tiltCtx.shadowBlur = 12;
+  tiltCtx.fill(); tiltCtx.shadowBlur = 0;
+  tiltCtx.restore();
+
+  tiltCtx.beginPath(); tiltCtx.arc(cx, cy, radius, 0, Math.PI * 2);
+  tiltCtx.strokeStyle = 'rgba(255,255,255,0.14)'; tiltCtx.lineWidth = 1.5; tiltCtx.stroke();
+  tiltCtx.fillStyle = 'rgba(255,255,255,0.35)';
+  tiltCtx.font = '11px IBM Plex Sans, sans-serif';
+  tiltCtx.textAlign = 'center';
+  tiltCtx.fillText('Pitch (+)', cx, cy - radius - 10);
+  tiltCtx.fillText('Pitch (−)', cx, cy + radius + 18);
+  tiltCtx.textAlign = 'left';  tiltCtx.fillText('Roll (+)',  cx + radius + 8, cy + 4);
+  tiltCtx.textAlign = 'right'; tiltCtx.fillText('Roll (−)',  cx - radius - 8, cy + 4);
+}
+
+function setMaxAngle(v) {
+  v = Math.max(5, Math.min(90, Math.round(v / 5) * 5));
+  maxAngle = v;
+  $('max-angle-slider').value = v;
+  $('max-angle-label').textContent = `±${v}°`;
+  drawTiltPlot(lastRoll, lastPitch);
+}
+$('max-angle-slider').addEventListener('input', () => setMaxAngle(Number($('max-angle-slider').value)));
+$('zoom-in') .addEventListener('click', () => setMaxAngle(maxAngle - 5));
+$('zoom-out').addEventListener('click', () => setMaxAngle(maxAngle + 5));
+
+// Mouse-wheel zoom over the tilt canvas. Negative deltaY = scroll up = zoom in.
+tiltCanvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  setMaxAngle(maxAngle + (e.deltaY > 0 ? 5 : -5));
+}, { passive: false });
+
+// ───────────────────────────────────────────────────────────────────────────
+// Session-wide Welford accumulator for mean + 2×2 covariance, used both for
+// the sway-area ellipse and as the "stop accumulating on Stop" mechanism.
+// ───────────────────────────────────────────────────────────────────────────
+let swayN = 0, swayMx = 0, swayMy = 0;
+let swayCxx = 0, swayCyy = 0, swayCxy = 0;
+let swayFrozen = false;
+
+function swayAccumulate(roll, pitch) {
+  swayN++;
+  const dx  = roll  - swayMx;
+  const dy  = pitch - swayMy;
+  swayMx   += dx / swayN;
+  swayMy   += dy / swayN;
+  const dx2 = roll  - swayMx;
+  const dy2 = pitch - swayMy;
+  swayCxx  += dx * dx2;
+  swayCyy  += dy * dy2;
+  swayCxy  += dx * dy2;
+}
+function resetSwayAccumulator() {
+  swayN = 0; swayMx = 0; swayMy = 0;
+  swayCxx = 0; swayCyy = 0; swayCxy = 0;
+}
+
+// 70 % prediction ellipse (chi² critical = 2.408 for p = 0.70).
+function computeSwayEllipse() {
+  if (swayN < 5) return null;
+  const cxx = swayCxx / (swayN - 1);
+  const cyy = swayCyy / (swayN - 1);
+  const cxy = swayCxy / (swayN - 1);
+  const trace = cxx + cyy;
+  const det   = cxx * cyy - cxy * cxy;
+  const disc  = Math.sqrt(Math.max(0, (trace / 2) ** 2 - det));
+  const lam1  = trace / 2 + disc, lam2 = trace / 2 - disc;
+  const k     = Math.sqrt(2.408);
+  const semiA = Math.sqrt(Math.max(0, lam1)) * k;
+  const semiB = Math.sqrt(Math.max(0, lam2)) * k;
+  const angle = Math.atan2(2 * cxy, cxx - cyy) / 2;
+  return { cx: swayMx, cy: swayMy, semiA, semiB, angle, area: Math.PI * semiA * semiB };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Session recording state. Metrics only accumulate while `recording` is true.
+// Stop freezes everything and autosaves a CSV. Zero resets the world.
+// ───────────────────────────────────────────────────────────────────────────
+let recording      = false;
+let sessionStartMs = 0;
+let timerHandle    = null;
+
+let sampleCount  = 0;
+let peakTilt     = 0;
+let sumTilt      = 0;
+let swayPath     = 0;
+let prevRecRoll  = null;
+let prevRecPitch = null;
+let csvRows      = [];
+
+function setRecordingButtons() {
+  $('btn-record').disabled = !connected || recording;
+  $('btn-stop')  .disabled = !recording;
+  $('btn-zero')  .disabled = !connected;
+}
+
+function startRecording() {
+  if (recording || !connected) return;
+
+  // Wipe every dashboard-side aggregate so this session starts from zero.
+  csvRows = []; sampleCount = 0; peakTilt = 0; sumTilt = 0;
+  swayPath = 0; prevRecRoll = null; prevRecPitch = null;
+  resetSwayAccumulator();
+  swayFrozen = false;
+
+  $('ss-n')   .textContent = '0';
+  $('ss-dur') .textContent = '0:00';
+  $('ss-peak').textContent = '–';
+  $('ss-avg') .textContent = '–';
+  $('ss-path').textContent = '–';
+  $('ss-vel') .textContent = '–';
+  $('ss-sway').textContent = '–';
+  $('ss-state').textContent = 'recording';
+  $('ss-state').style.color = 'var(--red)';
+
+  sessionStartMs = Date.now();
+  recording = true;
+  setRecordingButtons();
+  $('conn-dot').className = 'dot rec';
+
+  timerHandle = setInterval(() => {
+    const s = Math.floor((Date.now() - sessionStartMs) / 1000);
+    $('ss-dur').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }, 500);
+
+  log('Session started', 'ok');
+}
+
+function stopRecording() {
+  if (!recording) return;
+  recording = false;
+  clearInterval(timerHandle);
+  swayFrozen = true;             // ellipse + sway area freeze on last value
+  $('ss-state').textContent = 'stopped';
+  $('ss-state').style.color = 'var(--text2)';
+  $('conn-dot').className = connected ? 'dot on' : 'dot';
+  setRecordingButtons();
+
+  if (!csvRows.length) { log('No samples recorded — nothing to save', 'warn'); return; }
+
+  const hdr  = 'timestamp,elapsed_s,device_ms,roll_deg,pitch_deg,yaw_deg\n';
+  const blob = new Blob([hdr + csvRows.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'imu_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
+  a.click();
+  log(`Saved ${csvRows.length} samples → ${a.download}`, 'ok');
+}
+
+$('btn-record').addEventListener('click', startRecording);
+$('btn-stop')  .addEventListener('click', stopRecording);
+
+$('btn-zero').addEventListener('click', () => {
+  // Send firmware-side zero so the next frame is referenced from current pose.
+  sendCmd('ZERO');
+  // Abort any in-flight session — Zero is destructive, drop the CSV.
+  if (recording) {
+    recording = false;
+    clearInterval(timerHandle);
+    csvRows = [];
+    $('conn-dot').className = connected ? 'dot on' : 'dot';
+  }
+  resetAllVisualsAndAccumulators();
+  $('ss-state').textContent = 'idle';
+  $('ss-state').style.color = 'var(--text2)';
+  setRecordingButtons();
+  log('Zeroed — all metrics and visuals cleared');
+});
+
+function resetAllVisualsAndAccumulators() {
+  // Visual trail.
+  for (let i = 0; i < TRAIL_LEN; i++) { trailRoll[i] = 0; trailPitch[i] = 0; }
+  trailHead = 0; trailFull = false;
+  // Pending frame queue + device-time origin.
+  PENDING_FRAMES.length = 0;
+  haveFirstDeviceMs = false; firstDeviceMs = 0;
+  // Session accumulators + sway.
+  resetSwayAccumulator(); swayFrozen = false;
+  sampleCount = 0; peakTilt = 0; sumTilt = 0; swayPath = 0;
+  prevRecRoll = null; prevRecPitch = null;
+  // Tile values.
+  ['ss-n','ss-dur','ss-peak','ss-avg','ss-path','ss-vel','ss-sway']
+    .forEach(id => $(id).textContent = '–');
+  ['v-roll','v-pitch','v-tilt']
+    .forEach(id => $(id).textContent = '–');
+  // Chart.
+  if (chart) {
+    ['labels','roll','pitch'].forEach(k => { chartData[k].length = 0; });
+    chartDirty = true;
+  }
+  lastRoll = 0; lastPitch = 0;
+  drawTiltPlot(0, 0);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Chart.js tilt-vs-time, 20 Hz redraw cap.
+// ───────────────────────────────────────────────────────────────────────────
+const MAX_CHART = 250;             // ~5 s at 50 Hz
+const chartData = { labels: [], roll: [], pitch: [] };
+let   chart      = null;
+let   chartDirty = false;
+let   chartLastDrawMs = 0;
+const CHART_REDRAW_MS = 50;
+
+function initChart() {
+  chart = new Chart($('timeChart').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: chartData.labels,
+      datasets: [
+        { label: 'Roll',  data: chartData.roll,  borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: .3 },
+        { label: 'Pitch', data: chartData.pitch, borderColor: '#4ade80', borderWidth: 1.5, pointRadius: 0, tension: .3 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#55555c', font: { size: 10, family: 'IBM Plex Mono' }, maxTicksLimit: 8 },
+             grid: { color: 'rgba(255,255,255,.04)' }, border: { color: 'rgba(255,255,255,.08)' } },
+        y: { ticks: { color: '#55555c', font: { size: 10, family: 'IBM Plex Mono' } },
+             grid: { color: 'rgba(255,255,255,.04)' }, border: { color: 'rgba(255,255,255,.08)' } },
+      },
+    },
+  });
+}
+initChart();
+
+function pushChartPoint(elapsed, roll, pitch) {
+  chartData.labels.push(elapsed.toFixed(1) + 's');
+  chartData.roll  .push(roll);
+  chartData.pitch .push(pitch);
+  if (chartData.labels.length > MAX_CHART) {
+    chartData.labels.shift();
+    chartData.roll .shift(); chartData.pitch.shift();
+  }
+  chartDirty = true;
+}
+
+(function chartRafLoop() {
+  requestAnimationFrame(chartRafLoop);
+  if (!chartDirty || !chart) return;
+  const now = performance.now();
+  if (now - chartLastDrawMs < CHART_REDRAW_MS) return;
+  chartLastDrawMs = now;
+  chartDirty = false;
+  chart.update('none');
+})();
+
+// ───────────────────────────────────────────────────────────────────────────
+// Main rAF loop — drains everything queued since the last tick, updates
+// instant tiles + trail + chart + session aggregates, and redraws the plot.
+// Sample-paced state (trail/chart/session metrics/CSV) runs once per frame,
+// not once per rAF, so a 60 Hz rAF over a 50 Hz feed cannot double-count.
+// ───────────────────────────────────────────────────────────────────────────
+(function rafLoop() {
+  requestAnimationFrame(rafLoop);
+
+  // Drain pending frames in order.
+  while (PENDING_FRAMES.length > 0) {
+    const f = PENDING_FRAMES.shift();
+
+    if (!haveFirstDeviceMs) {
+      firstDeviceMs = f.deviceMs;
+      haveFirstDeviceMs = true;
+    }
+
+    // Latest values feed the live tiles + tilt-plot dot.
+    lastRoll = f.roll; lastPitch = f.pitch;
+
+    // Fading trail — visual-only, regardless of recording state.
+    trailRoll[trailHead]  = f.roll;
+    trailPitch[trailHead] = f.pitch;
+    trailHead = (trailHead + 1) % TRAIL_LEN;
+    if (trailHead === 0) trailFull = true;
+
+    // Time-series chart — always live.
+    const elapsedDevS = (f.deviceMs - firstDeviceMs) / 1000;
+    pushChartPoint(elapsedDevS, f.roll, f.pitch);
+
+    // Session aggregates — only while recording, frozen on Stop.
+    if (recording && !swayFrozen) {
+      swayAccumulate(f.roll, f.pitch);
+
+      sampleCount++;
+      const fTilt = Math.hypot(f.roll, f.pitch);
+      if (fTilt > peakTilt) peakTilt = fTilt;
+      sumTilt += fTilt;
+      if (prevRecRoll !== null) {
+        swayPath += Math.hypot(f.roll - prevRecRoll, f.pitch - prevRecPitch);
+      }
+      prevRecRoll = f.roll; prevRecPitch = f.pitch;
+
+      // Record CSV row.
+      const sessionElapsedS = (Date.now() - sessionStartMs) / 1000;
+      csvRows.push([
+        new Date().toISOString(),
+        sessionElapsedS.toFixed(3),
+        f.deviceMs,
+        f.roll.toFixed(4),
+        f.pitch.toFixed(4),
+        f.yaw.toFixed(4),
+      ].join(','));
+    }
+  }
+
+  // Update tile text + redraw the tilt plot at the rAF rate (typ. 60 Hz).
+  // Instantaneous tiles — always live, even when not recording.
+  const tilt = Math.hypot(lastRoll, lastPitch);
+  $('v-roll') .textContent = lastRoll .toFixed(2);
+  $('v-pitch').textContent = lastPitch.toFixed(2);
+  $('v-tilt') .textContent = tilt     .toFixed(2);
+
+  // Session-metric tiles — refresh while recording so the user sees them grow.
+  if (recording && !swayFrozen) {
+    const durS = (Date.now() - sessionStartMs) / 1000;
+    $('ss-n')   .textContent = sampleCount.toString();
+    $('ss-peak').textContent = peakTilt.toFixed(2);
+    $('ss-avg') .textContent = sampleCount > 0 ? (sumTilt / sampleCount).toFixed(2) : '–';
+    $('ss-path').textContent = swayPath.toFixed(2);
+    $('ss-vel') .textContent = durS > 0 ? (swayPath / durS).toFixed(2) : '–';
+    const e = computeSwayEllipse();
+    $('ss-sway').textContent = e ? e.area.toFixed(2) : '–';
+  }
+
+  drawTiltPlot(lastRoll, lastPitch);
+})();
+
+// First paint.
+drawTiltPlot(0, 0);
+log('Click Connect and pick IMUBoard-MG24.');
+</script>
+
+</body>
+</html>
