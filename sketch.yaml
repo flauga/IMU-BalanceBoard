@@ -1,0 +1,20 @@
+# arduino-cli profile for the XIAO MG24 Sense build.
+# Build with:  arduino-cli compile --profile xiao_mg24
+# Upload with: arduino-cli compile --profile xiao_mg24 -u -p <PORT>
+#
+# Requires the SiliconLabs Arduino core, installed by adding the URL below
+# to arduino-cli's board-manager URLs and running `core install SiliconLabs:silabs`.
+# The "BLE (Silabs)" protocol stack is selected via the protocol_stack_ble
+# menu option below — this is what unlocks the custom GATT API our firmware
+# depends on.
+
+profiles:
+  xiao_mg24:
+    fqbn: SiliconLabs:silabs:xiao_mg24:protocol_stack=ble_silabs,reference_voltage=avdd
+    platforms:
+      - platform: SiliconLabs:silabs (3.0.0)
+        platform_index_url: https://siliconlabs.github.io/arduino/package_arduinosilabs_index.json
+    libraries:
+      - Seeed Arduino LSM6DS3 (2.0.5)
+
+default_profile: xiao_mg24

@@ -1,14 +1,14 @@
 #include "serial_command.h"
 #include "config.h"
 #include "imu_driver.h"
-#include "wifi_manager.h"
-#include <WiFi.h>
+#include "ble_manager.h"
 #include <cstring>
 #include <cstdlib>
 #include <Arduino.h>
 
 // Defined in main.cpp
 extern void zeroOrientation();
+extern void clearZeroOrientation();
 extern void setDriftLog(bool on);
 extern void setSerialPrintEnabled(bool on);
 extern void setSerialPrintDivider(uint32_t div);
@@ -52,6 +52,8 @@ void SerialCommand::processCommand(const char* cmd) {
                       hz, (unsigned long)print_interval_ms_);
     } else if (strcasecmp(cmd, "ZERO") == 0) {
         zeroOrientation();
+    } else if (strcasecmp(cmd, "ZEROCLEAR") == 0) {
+        clearZeroOrientation();
     } else if (strcasecmp(cmd, "DEBUG ON") == 0) {
         setDriftLog(true);
     } else if (strcasecmp(cmd, "DEBUG OFF") == 0) {
@@ -75,7 +77,8 @@ void SerialCommand::printHelp() {
     Serial.println("  STOP        Pause streaming");
     Serial.println("  STATUS      Show current state");
     Serial.println("  RATE <hz>   Set output rate (1-50 Hz)");
-    Serial.println("  ZERO        Capture current orientation as new zero");
+    Serial.println("  ZERO        Capture current orientation as new zero (saved to NVM)");
+    Serial.println("  ZEROCLEAR   Forget saved zero; next boot uses boot pose");
     Serial.println("  DEBUG ON    Enable drift diagnostic log (1 Hz)");
     Serial.println("  DEBUG OFF   Disable drift diagnostic log");
     Serial.println("  SERIAL ON   Enable per-frame angle print on UART");
@@ -86,19 +89,15 @@ void SerialCommand::printHelp() {
 
 void SerialCommand::printStatus() {
     Serial.println("=== Status ===");
-    Serial.printf("  Firmware:  v%s (LSM6DSO + Mahony)\n", FIRMWARE_VERSION);
+    Serial.printf("  Firmware:  v%s (LSM6DS3 + Mahony, BLE)\n", FIRMWARE_VERSION);
     Serial.printf("  Streaming: %s\n", (streaming_ && *streaming_) ? "yes" : "no");
     Serial.printf("  Rate:      %lu ms (%lu Hz)\n",
                   (unsigned long)print_interval_ms_,
                   (unsigned long)(1000 / print_interval_ms_));
-    Serial.printf("  Free heap: %lu bytes\n", (unsigned long)ESP.getFreeHeap());
-    if (wifi_ && wifi_->isConnected()) {
-        Serial.printf("  WiFi SSID: %s\n", WiFi.SSID().c_str());
-        Serial.printf("  WiFi IP:   %s\n", WiFi.localIP().toString().c_str());
-        Serial.printf("  WiFi RSSI: %d dBm  ch=%d\n", WiFi.RSSI(), WiFi.channel());
-        Serial.printf("  WS port:   %u\n", WIFI_WS_PORT);
-        Serial.printf("  WS clients:%u\n", wifi_->clientCount());
+    if (ble_ && ble_->isConnected()) {
+        Serial.printf("  BLE:       advertising as %s\n", BLE_DEVICE_NAME);
+        Serial.printf("  Central:   %s\n", ble_->hasClient() ? "connected" : "none");
     } else {
-        Serial.println("  WiFi:      not connected");
+        Serial.println("  BLE:       not initialised");
     }
 }

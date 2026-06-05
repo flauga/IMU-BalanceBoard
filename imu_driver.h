@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <SparkFunLSM6DSO.h>
+#include <LSM6DS3.h>
 #include "config.h"
 #include "types.h"
 
@@ -34,7 +34,10 @@ public:
     void resetWatchdog() { last_data_ms_ = millis(); }
 
 private:
-    LSM6DSO imu_;
+    // Seeed_Arduino_LSM6DS3's LSM6DS3 wraps LSM6DS3Core; constructed with
+    // (interface, address). The library's I2C path uses the global Wire by
+    // default — we patch the bus in begin() before configuration.
+    LSM6DS3 imu_{I2C_MODE, LSM6DS3_I2C_ADDR};
 
     float ax_ = 0.0f, ay_ = 0.0f, az_ = 0.0f;  // m/s²
     float gx_ = 0.0f, gy_ = 0.0f, gz_ = 0.0f;  // rad/s, bias-corrected
@@ -44,4 +47,6 @@ private:
 
     bool     new_data_     = false;
     uint32_t last_data_ms_ = 0;
+
+    bool dataReady(uint8_t mask) const;  // mask: 0x01=XLDA, 0x02=GDA
 };

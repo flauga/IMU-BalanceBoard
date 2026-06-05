@@ -1,188 +1,201 @@
-# IMU Balance Board Firmware
+# IMU Balance Board Firmware — XIAO MG24 Sense
 
-ESP32 DevKit V1 + LSM6DSO IMU firmware for instrumented wobble board balance assessment.
-Outputs real-time tilt angles (roll, pitch, yaw) over serial and WiFi WebSocket.
-Sensor fusion is performed on the ESP32 using a Mahony complementary filter fed by
-raw accelerometer and gyroscope data from the LSM6DSO.
+Seeed Studio XIAO MG24 Sense firmware for instrumented wobble-board balance
+assessment. Outputs real-time tilt angles (roll, pitch, yaw) over USB serial
+and Bluetooth LE GATT notifications.
+
+Sensor fusion is performed on-device using a Mahony complementary filter fed
+by raw accelerometer and gyroscope data from the board's built-in LSM6DS3TR-C.
+
+> This is the **`mg24`** branch. The original ESP32 + LSM6DSO breakout port
+> lives on the `master` branch and uses PlatformIO. This branch builds with
+> Arduino IDE / arduino-cli instead — see "Why not PlatformIO?" below.
 
 ## Hardware
 
-- ESP32 DOIT DevKit V1
-- SmartElex 6 Degrees of Freedom Breakout — LSM6DSO
+- **Seeed Studio XIAO MG24 Sense** — Silicon Labs EFR32MG24 (Cortex-M33, 78 MHz)
+- Built-in **LSM6DS3TR-C** 6-DoF IMU on the internal I2C bus (`Wire1`)
 
-Uses **I2C** (the breakout's default protocol).
+No external wiring is required — the IMU is on-board. The Arduino core wires
+the power rail and pulls the address line so the device appears at I²C
+address **0x6A**.
 
-> **Warning:** The LSM6DSO is a 3.3V device. The ESP32 DevKit V1 has 3.3V I/O on its
-> GPIO pins, so no level shifting is needed for I2C.
+The Seeed-Arduino-LSM6DS3 library automatically:
 
-### LSM6DSO Breakout Pin Reference
+- Remaps `Wire` → `Wire1` when `ARDUINO_XIAO_MG24` is defined
+- Drives the IMU power pin (`PD5`) HIGH during `beginCore()`
 
-| Breakout Pin | Description |
-|---|---|
-| 3V3 | 3.3V power input |
-| GND | Ground |
-| SDA | I2C data (default address 0x6B — SA0/SDO pulled high on SmartElex board) |
-| SCL | I2C clock |
-| INT1 | Programmable interrupt output (not used in this firmware) |
-| INT2 | Programmable interrupt output (not used in this firmware) |
-| CS | SPI chip select — leave unconnected for I2C mode |
-| SDO | Address select / SPI data out — sets address 0x6B when high (default) |
-
-### Wiring (I2C)
-
-| ESP32 GPIO | Function | LSM6DSO Pin |
-|---|---|---|
-| GPIO 21 | SDA | SDA |
-| GPIO 22 | SCL | SCL |
-| 3V3 | Power | 3V3 |
-| GND | Ground | GND |
-
-Total: **4 wires**. No reset pin. No interrupt pin required.
-
-```
-  ESP32 DevKit V1                     SmartElex LSM6DSO breakout
-  ~~~~~~~~~~~~~~~                     ~~~~~~~~~~~~~~~~~~~~~~~~~~
-  3V3  ——————————————————————————————  3V3
-  GND  ——————————————————————————————  GND
-  GPIO 21 (SDA) ————————————————————  SDA
-  GPIO 22 (SCL) ————————————————————  SCL
-```
-
-### I2C Address
-
-The SmartElex breakout pulls SA0/SDO high by default, giving address **0x6B**.
-To use 0x6A, cut the address jumper on the back of the board.
+No code in this firmware touches those pins directly.
 
 ## Sensor Fusion
 
-The BNO085 variant of this firmware used on-chip SH2 fusion (quaternion output).
-The LSM6DSO provides only raw accelerometer (±4g) and gyroscope (±500 dps) data,
-so orientation is computed on the ESP32 using a **Mahony complementary filter**:
+The LSM6DS3TR-C provides only raw accelerometer (±4 g) and gyroscope (±500
+dps) data, so orientation is computed on the MG24 using a **Mahony
+complementary filter**:
 
 - Gyroscope integration provides fast, low-noise short-term orientation tracking
 - Accelerometer provides long-term gravity reference to correct gyro drift
 - Adaptive gain gates accel trust: ignored during dynamic motion (high variance)
-  and when the accel magnitude deviates significantly from 1g
+  and when the accel magnitude deviates significantly from 1 g
 - Integral term continuously estimates and removes gyro bias
 
-The filter runs at **208 Hz** (the LSM6DSO ODR). Outputs are roll, pitch, yaw in degrees.
+The filter runs at **208 Hz** (the LSM6DS3 ODR). Outputs are roll, pitch, yaw
+in degrees.
 
-**Yaw note:** Without a magnetometer, yaw is gyro-integrated only and will drift slowly
-over time. Roll and pitch are stable because they are gravity-referenced.
+**Yaw note:** Without a magnetometer, yaw is gyro-integrated only and will
+drift slowly over time. Roll and pitch are stable because they are
+gravity-referenced.
 
-### Tuning (include/config.h)
+### Tuning (`config.h`)
 
 | Constant | Default | Effect |
 |---|---|---|
-| `MAHONY_KP` | 2.0 | Proportional gain — higher = accel corrects faster, more noise |
-| `MAHONY_KI` | 0.005 | Integral gain — higher = removes bias faster |
+| `MAHONY_KP` | 0.5 | Proportional gain — higher = accel corrects faster, more noise |
+| `MAHONY_KI` | 0.00005 | Integral gain — higher = removes bias faster |
 | `MAHONY_ACCEL_GATE` | 4.0 | Sharpness of magnitude gate |
 | `MAHONY_VAR_THRESHOLD` | 0.002 g² | Above this variance = motion detected, accel ignored |
 
 ## Building
 
-Requires [PlatformIO](https://platformio.org/).
+### Prerequisites
+
+1. Install **Arduino IDE 2.x** (or `arduino-cli`).
+2. Add the SiliconLabs board-manager URL in Preferences:
+   `https://siliconlabs.github.io/arduino/package_arduinosilabs_index.json`
+3. Open **Tools → Board → Boards Manager**, search for "Silicon Labs", and
+   install the `Silicon Labs` core (version 3.0.0 or later).
+4. Open **Sketch → Include Library → Manage Libraries**, search for
+   `Seeed Arduino LSM6DS3` and install it.
+
+### Configure the protocol stack
+
+This is the critical step — the firmware uses the Silicon Labs BGAPI
+directly, which only links when the right protocol stack variant is selected.
+
+In **Tools → Protocol stack**, choose **`BLE (Silabs)`**. Not "BLE (Arduino)"
+and not "Matter". The default for the XIAO MG24 board entry is usually
+"Matter", which will produce a duplicate-`sl_bt_on_event` link error.
+
+### Compile and upload
+
+In Arduino IDE:
+
+1. Open `IMUBalanceBoard.ino`.
+2. Select **Tools → Board → Silicon Labs → Seeed Studio XIAO MG24 Sense**.
+3. Select the USB port the device enumerates as.
+4. Click **Upload**.
+
+With `arduino-cli` (a `sketch.yaml` profile is included):
 
 ```bash
-pio run              # compile
-pio run -t upload    # flash to ESP32
-pio device monitor   # open serial monitor at 921600 baud
+arduino-cli compile --profile xiao_mg24
+arduino-cli compile --profile xiao_mg24 -u -p COM7        # adjust port
+arduino-cli monitor -p COM7 -c baudrate=115200
 ```
 
-## WiFi Dashboard
+### Why not PlatformIO?
 
-On first boot the ESP32 connects to WiFi (configure credentials in
-`include/wifi_config.h`) and serves the dashboard over plain HTTP on **port 80**.
-The WebSocket stream runs on **port 81** and the dashboard auto-connects to it.
+The current PlatformIO Seeed-MG24 platform (1.0.0) hardcodes the **Matter**
+variant of the Silicon Labs Arduino framework. That variant ships its own
+`sl_bt_on_event()` for Matter commissioning, so a sketch that adds its own
+custom GATT service produces a link-time duplicate-symbol error.
 
-mDNS (`imuboard.local`) is **disabled by default** — see the Debugging Timeline
-below for why. The recommended setup is:
+Switching the variant requires patching
+`<platforms>/Seeed Studio/builder/board_build/siliconlab/siliconlab_arduino.py`
+to swap every reference to the `matter/` variant directory for `ble_silabs/`
+— a global change to the toolchain. Arduino IDE exposes the same switch as a
+one-click **Tools → Protocol stack** menu, so this branch uses Arduino IDE.
 
-1. Power the ESP32 once and read the boot banner on the serial monitor:
-   ```
-   ========================================
-     Hostname: imuboard500
-     MAC:      A8:03:2A:5F:B2:E4
-     IP:       192.168.0.10
-     Open the dashboard at:
-       http://192.168.0.10/   (direct IP)
-   ========================================
-   ```
-2. In your router's DHCP settings, **reserve** that MAC → a known IP (we use
-   `192.168.0.10`, `.11`, `.12` for our three boards).
-3. Bookmark `http://192.168.0.10/` on your tablet.
+If you would rather keep PlatformIO, see commit history for an in-progress
+attempt; the patching plan is sketched there.
 
-To re-enable mDNS, set `MDNS_ENABLED 1` in `include/config.h`.
+## Bluetooth LE Dashboard
 
-## Dashboard Metrics
+On boot the MG24 advertises a custom GATT service as `IMUBoard-MG24`. Any
+Web-Bluetooth client (Chrome / Edge on desktop or Android, Bluefy on iOS)
+that subscribes to the angles characteristic will receive notifications at
+50 Hz.
 
-The dashboard displays seven balance metrics. The first four are instantaneous
-(updated every frame); the remaining are session aggregates that reset on
-**Start Session**.
+A ready-to-use dashboard is shipped in this repo as
+[dashboard.html](dashboard.html). It runs entirely client-side, no server
+needed. You can use it two ways:
 
-### Instantaneous
+- **Locally** — double-click `dashboard.html` in Windows Explorer to open it
+  in your default browser.
+- **Hosted** — a copy is published over HTTPS at
+  **<https://flauga.github.io/IMU-BalanceBoard/>** (served from the
+  `gh-pages` branch). HTTPS is required because Web Bluetooth only works in a
+  secure context, so this is the way to open it on a phone.
 
-| Metric | Unit | Definition |
+Web Bluetooth support is platform-dependent:
+
+- **Android / desktop** — open the page in **Chrome** (or Edge) and tap
+  **Connect**.
+- **iPhone / iPad** — Safari and iOS Chrome do **not** support Web Bluetooth.
+  Install the free **Bluefy – Web BLE Browser** app and open the page inside
+  it instead.
+
+It carries over the full feature set of the ESP32 WiFi dashboard:
+
+- **Live tiles** for roll / pitch / tilt updated every frame. (Yaw is gyro-only
+  and drifts, so it is not shown — but it is still recorded in the CSV export.)
+- **Zoomable tilt plot** — slider, +/− buttons, and mouse-wheel over the
+  canvas all change the radial scale between ±5° and ±90°. The plot draws
+  a fading sample trail, the 70 % prediction ellipse, and the current dot.
+- **Tilt-vs-time chart** (Chart.js, 20 Hz redraw cap) for roll/pitch.
+- **Session metrics** that only accumulate while a session is active:
+  Samples, Duration, Max tilt, Avg tilt, Sway path, Mean velocity, Sway area.
+
+### Session lifecycle
+
+| Button | Effect |
+|---|---|
+| **Start session** | Resets all dashboard-side aggregates (counts, peaks, sway ellipse, CSV buffer) and begins accumulating from the next frame. |
+| **Stop & save CSV** | Freezes all metrics on their final values, downloads a `imu_<timestamp>.csv` file containing every recorded sample, and stops growing the CSV buffer. The ellipse stays visible as a summary. |
+| **Zero** | Sends `ZERO` to the firmware (so the next frame is referenced from the current pose) **and** clears every dashboard-side aggregate, the trail, the chart, and the dot. Any in-progress session is discarded without saving. |
+
+The session metric math (Welford online mean + covariance for the sway
+ellipse, chi² = 2.408 for the 70 % region) is identical to the ESP32
+firmware's embedded dashboard.
+
+### CSV format
+
+Columns: `timestamp, elapsed_s, device_ms, roll_deg, pitch_deg, yaw_deg`
+— same as the ESP32 dashboard's CSV export.
+
+### GATT layout
+
+| UUID | Properties | Payload |
 |---|---|---|
-| **Roll** | ° | Rotation about the board's X-axis (left/right lean). Positive = right side down. Gravity-referenced, no drift. |
-| **Pitch** | ° | Rotation about the board's Y-axis (front/back lean). Positive = front edge down. Gravity-referenced, no drift. |
-| **Yaw** | ° | Rotation about the vertical Z-axis (heading). Gyro-integrated only — drifts slowly over time. Use `ZERO` to reset. |
-| **Tilt** | ° | Magnitude of the off-vertical angle: `√(roll² + pitch²)`. A single number for how far off level the board is, regardless of direction. |
+| `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | Service | "IMU Balance Board" |
+| `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | Notify (16 B) | `{ uint32 ms; float roll; float pitch; float yaw }` little-endian |
+| `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | Write | UTF-8 command string (see below) |
 
-### Session aggregates
+The binary frame is identical to the ESP32 firmware's `BIN ON` mode, so
+existing Web-Bluetooth dashboards built for that wire format work unchanged
+once they swap WebSocket → BLE GATT.
 
-| Metric | Unit | Definition |
-|---|---|---|
-| **Samples** | count | Number of frames received since session start. At the default 50 Hz output rate the count rises ~50/s. |
-| **Duration** | mm:ss | Wall-clock time since **Start Session** was pressed. |
-| **Max tilt** | ° | Largest single-frame tilt value seen during the session. Sensitive to single spikes. |
-| **Avg tilt** | ° | Mean tilt across all samples: `Σ tilt / N`. Lower = steadier balance overall. |
-| **Sway path** | ° | Total distance traced in the roll/pitch plane: `Σ √(Δroll² + Δpitch²)`. Think of it as the length of the path a pen would draw on a roll/pitch graph. Lower = less corrective movement. |
-| **Mean velocity** | °/s | `sway path / duration`. Average angular speed of the board's tilt — how fast the user is correcting. |
-| **Sway area** | °² | Area of the **70 % prediction ellipse** fitted to the entire session's roll/pitch samples. This is the region on the roll/pitch plane that contained the board's tilt for ~70 % of the session. Smaller = a tighter, more consistent stance. |
+### BLE commands
 
-### About the sway area
-
-The yellow ellipse on the tilt plot is the geometric representation of the sway
-area metric. It is computed by:
-
-1. Maintaining a **running mean and 2×2 covariance matrix** of every
-   (roll, pitch) sample in the session (Welford's online algorithm — no sample
-   storage required).
-2. Solving for the eigenvalues of that covariance matrix to find the ellipse's
-   principal axes (the two directions of largest spread) and their lengths.
-3. Scaling the axes by `√2.408` — the chi-square critical value such that a 2-D
-   Gaussian distribution has 70 % of its probability mass inside the ellipse.
-
-Unlike a rolling-window sway area (which would only reflect the last few
-seconds), this ellipse represents the **typical region the user occupied across
-the entire session**, making it a stable summary of overall stance consistency.
-It updates live as more samples arrive, converging on a stable value once the
-user has been on the board for a few seconds.
-
-### Session-control behaviour
-
-The three buttons interact with the sway ellipse and other session metrics
-as follows:
-
-| Button | Sway area / ellipse | Other session aggregates | Tilt plot + chart |
-|---|---|---|---|
-| **Start Session** | Reset to empty, begin accumulating | All cleared, begin accumulating | Continues live |
-| **Stop & Save CSV** | **Freezes** on the final value and stays visible | Stops updating; final values stay visible | Continues live |
-| **Zero** | Cleared and unfrozen — starts accumulating again on next sample | All cleared back to "—" | Cleared (trail, chart, dot reset to default) |
-
-After a Stop, the sway ellipse and number remain on screen as a summary of
-the just-finished session — useful for showing the patient or clinician their
-result. Hit Zero or Start Session to begin fresh.
-
-## Serial Commands
+The command characteristic accepts the same text commands as the UART:
 
 | Command | Description |
 |---|---|
 | `START` / `STOP` | Begin / pause streaming |
-| `STATUS` | Show firmware version, sensor, heap, WiFi info |
+| `ZERO` | Reset orientation reference to current pose (persisted to NVM — survives power cycles) |
+| `DEBUG ON` / `DEBUG OFF` | Toggle 1 Hz drift-diagnostic log |
+| `RATE <hz>` | Set output rate 1–50 Hz |
+
+## Serial Commands
+
+Identical to the ESP32 firmware:
+
+| Command | Description |
+|---|---|
+| `START` / `STOP` | Begin / pause streaming |
+| `STATUS` | Show firmware version, BLE status, etc. |
 | `RATE <hz>` | Set output rate 1–50 Hz (default 50 Hz) |
-| `ZERO` | Reset orientation reference to current pose |
+| `ZERO` | Reset orientation reference to current pose (persisted to NVM — survives power cycles) |
 | `DEBUG ON` / `DEBUG OFF` | Toggle 1 Hz drift-diagnostic log |
 | `SERIAL ON` / `SERIAL OFF` | Toggle per-frame angle prints on the UART |
 | `SERIAL DIV <n>` | Print 1 of every n frames (default 5 = ~10 Hz UART) |
@@ -201,180 +214,46 @@ Example:
 
 Once per second a diagnostic line is also printed:
 ```
-[STATS] tx=50/s samples=193/s maxGap=21ms heap=234KB rssi=-52 clients=1
+[STATS] tx=50/s samples=193/s maxGap=21ms clients=1
 ```
 
 | Field | Meaning |
 |---|---|
-| `tx` | WebSocket frames broadcast in the last second (expected ≈ 50) |
-| `samples` | IMU samples published by the sensor task (expected ≈ 190–200) |
-| `maxGap` | Worst inter-broadcast gap in ms (expected ≈ 21; spikes flag stalls) |
-| `heap` | Free heap in KB |
-| `rssi` | WiFi signal strength in dBm |
-| `clients` | Number of connected WebSocket clients (0 or 1 — single-client policy) |
+| `tx` | BLE notifications sent in the last second (expected ≈ 50) |
+| `samples` | IMU samples published by the sensor loop (expected ≈ 190–200) |
+| `maxGap` | Worst inter-send gap in ms (expected ≈ 21; spikes flag stalls) |
+| `clients` | Number of connected BLE centrals (0 or 1) |
 
 ---
 
-## Firmware Architecture
+## Differences from the ESP32 firmware
 
-### Why this is non-trivial
+The MG24 port shares the same Mahony filter, types, and the bulk of the
+business logic. Major architectural differences:
 
-A naive ESP32-Arduino implementation puts the IMU read, sensor fusion, and
-WebSocket broadcast all in `loop()` on core 1. On paper that works at 50 Hz.
-In practice it produces multi-second freezes during heavy motion: the WiFi
-driver's internal task (priority ~23, on core 1) periodically preempts the
-Arduino loop task (priority 1) for radio housekeeping, and the broadcast
-stops. The IMU stops getting polled too, because it's on the same task.
+- **No FreeRTOS dual-core split.** The ESP32 firmware ran IMU sampling on
+  core 0 and WiFi/WebSocket transmit on core 1 with seqlock snapshots, to
+  dodge the WiFi driver preempting the Arduino loop. The MG24 is single-core
+  Cortex-M33 with a much lighter-weight BLE stack (BGAPI), so a simple
+  cooperative `loop()` handles everything at well over 200 Hz polling rate.
 
-The firmware therefore splits work across **three FreeRTOS tasks** with
-carefully chosen core affinities and priorities:
+- **BLE GATT instead of HTTP + WebSocket.** No embedded web server, no
+  dashboard HTML, no mDNS. The dashboard is now a separate Web-Bluetooth
+  client.
 
-| Task | Core | Priority | Job |
-|---|---|---|---|
-| `imu_sensor` | 0 | `configMAX_PRIORITIES - 2` | Polls IMU at 208 Hz, runs Mahony + EMA, publishes the latest sample to a snapshot |
-| `wifi_tx` | 1 | 5 | Runs `_ws->loop()`, serves HTTP requests, broadcasts the latest snapshot at ≈50 Hz |
-| Arduino `loop` | 1 | 1 (default) | Serial-command poll, periodic STATUS broadcast, once-per-second `[STATS]` log |
+- **No `wifi_config.h`.** SSID / credentials are gone. The device is paired
+  by BLE address.
 
-The two key choices:
+- **`Wire1` instead of `Wire`.** The LSM6DS3 sits on the MG24's internal I2C
+  bus. The Seeed library handles this transparently for our code.
 
-- **`imu_sensor` on core 0** isolates IMU sampling from the WiFi driver and
-  the WebSocket library, both of which live on core 1. Even if core 1 is
-  fully preempted for two seconds, the sensor task keeps producing samples.
-- **`wifi_tx` at priority 5** sits *above* the Arduino loop task (priority 1)
-  but well *below* the WiFi driver (~23). When core 1 schedules out the
-  Arduino loop, `wifi_tx` still runs and keeps frames flowing. This is the
-  single change that eliminated the visible freezes.
+- **Serial baud lowered to 115200.** USB-CDC on the MG24 is not the throughput
+  bottleneck the ESP32's hardware UART was, but 115200 is the conventional
+  default for Arduino USB CDC.
 
-### Inter-task data flow
+- **No `ESP.getFreeHeap()` diagnostic.** No equivalent on the MG24 / Silabs
+  core that's worth exposing.
 
-Two **seqlock**-protected snapshots carry state between tasks. A seqlock is
-a wait-free reader pattern: writers increment an atomic counter to odd
-(writing), update the payload, then increment to even (stable). Readers
-re-try until they see a stable counter on either side of their copy, which
-means they got a consistent snapshot. No mutex, no priority inversion, no
-producer ever waits.
-
-```
-  ┌───────────────────────────┐                          ┌───────────────────────────┐
-  │  imu_sensor (core 0)      │                          │  wifi_tx (core 1, p=5)    │
-  │  - reads LSM6DSO @ 208 Hz │                          │  - _ws->loop()            │
-  │  - Mahony filter          │     g_snap (seqlock)     │  - _pollHttp()            │
-  │  - EMA smoothing          │ ───────────────────────► │  - read latest _txSnap    │
-  │  - publishes g_snap       │                          │  - broadcastBIN to client │
-  └────────────┬──────────────┘                          └─────────────▲─────────────┘
-               │                                                       │
-               │                                                       │ _txSnap (seqlock,
-               │                                                       │  +pub-counter)
-               │                                                       │
-               │       ┌────────────────────────────────┐              │
-               │       │  Arduino loop (core 1, p=1)    │              │
-               └──────►│  - reads g_snap @ 50 Hz        ├──────────────┘
-                       │  - publishes _txSnap           │
-                       │  - serial poll, STATS print    │
-                       └────────────────────────────────┘
-```
-
-The "publish counter" on `_txSnap` lets `wifi_tx` know whether there's a
-fresh sample to send (avoiding duplicate broadcasts) without needing
-condition variables.
-
-### Other architecture choices
-
-- **Synchronous `WiFiServer`** for HTTP — `AsyncWebServer` + `AsyncTCP` were
-  removed because `AsyncTCP` spawns its own task that intermittently caused
-  300+ ms stalls. The dashboard HTML is served in one shot per page load,
-  which the synchronous server handles fine.
-- **`WebSocketsServer` (links2004)** for the WS protocol — synchronous,
-  but driven from the dedicated `wifi_tx` task so its blocking semantics
-  no longer matter to the rest of the system.
-- **Single-client policy** — the WS server rejects a second connection so
-  the broadcast load stays constant. Open a tab elsewhere and the first
-  must disconnect before the second can take its slot.
-- **Binary WS frames (16 B little-endian, `uint32 ms + 3× float32`)** —
-  half the bandwidth of text CSV and avoids `snprintf` cost on the ESP32.
-  The dashboard opts in via `BIN ON` immediately on connect.
-- **Dashboard-side jitter buffer with device-time playback** — incoming
-  frames are kept for 200 ms before rendering, keyed on the ESP32's
-  `millis()` timestamp (not browser arrival time). This makes burst-arrivals
-  after a brief network hiccup play back smoothly at 50 Hz instead of fast-
-  forwarding, and absorbs sub-200 ms jitter without any visible artefact.
-
----
-
-## Debugging Timeline
-
-This section is here so the next person to touch the firmware doesn't have
-to re-derive what works from scratch. The path from "freezes every 5
-seconds" to "no observable freezes" was long.
-
-### Symptom
-
-Multi-second freezes in the dashboard, especially during board motion. The
-IMU sample timestamps showed gaps of 1–2.5 s, with bursts of catch-up frames
-afterwards. Sometimes both cores stalled simultaneously, sometimes only
-core 1.
-
-### Suspects investigated, ordered by chronology
-
-| # | Suspect | Verdict | Notes |
-|---|---|---|---|
-| 1 | I²C bus errors during motion | Innocent | `imuUpd` time stayed ~7 µs even during stalls; sensor task never lost time |
-| 2 | `ESPAsyncWebServer` / `AsyncTCP` | **Guilty** | The async TCP task on core 0 caused 300 ms+ stalls every few seconds. Replaced with sync `WiFiServer`. **Major improvement.** |
-| 3 | `ESPmDNS` responder | **Guilty** | Incoming multicast queries on the LAN (Apple devices, smart TVs, printers) ran responder work inside the WiFi/lwIP task on core 0 — periodic dual-core stalls. **Set `MDNS_ENABLED 0`; use DHCP-reserved IPs instead.** |
-| 4 | WiFi power-save | Partial | `WiFi.setSleep(WIFI_PS_NONE)` + `setTxPower(WIFI_POWER_19_5dBm)` helped a little |
-| 5 | WebSocket library's TCP write timeout (default 5000 ms) | Partial | A slow browser fills the TCP send buffer; `WiFiClient::write()` blocks waiting for ACKs. Tried patching the library to set `SO_SNDTIMEO` to 50 ms on accepted clients — helped slightly but didn't eliminate freezes. Superseded by the dedicated TX task (item #10), which made WS blocking semantics irrelevant. Patch was removed |
-| 6 | Multiple WS clients (zombie tabs) | Mild | Doubled broadcast load. Added single-client policy that rejects connection #2 |
-| 7 | Browser-side render load (Chart.js redraws on every frame) | Mild | Throttled Chart.js redraw to 20 Hz via a `requestAnimationFrame` loop |
-| 8 | Bursty arrivals after a brief network gap | Mild | Dashboard's jitter buffer now plays back on device-time, not arrival-time |
-| 9 | `loop()` not yielding to async helpers | Mild | Added `vTaskDelay(1)` at end of `loop()` |
-| 10 | **WiFi driver preempting the Arduino loop task** | **Root cause of remaining stalls** | The WiFi driver runs at priority ~23 on core 1 and routinely preempts the loop task (priority 1) for radio housekeeping. **Fixed by moving WS broadcast and `_ws->loop()` to a dedicated `wifi_tx` task at priority 5 on core 1** — high enough to survive the preemption pattern |
-
-### Things that were tried but did **not** help
-
-- Lowering `CONFIG_MDNS_TASK_PRIORITY` via PlatformIO build flag. **Doesn't take
-  effect** because Arduino-ESP32 ships a pre-built IDF — FreeRTOSConfig.h is
-  baked in and ignores `-D` overrides.
-- `configGENERATE_RUN_TIME_STATS=1` for `uxTaskGetSystemState()`. Same problem
-  as above — the trace facility is compiled out of the pre-built FreeRTOS.
-- Bigger TCP send buffer (`SO_SNDBUF`). The stall wasn't a buffer-fill issue;
-  it was task preemption. Bigger buffer doesn't help if no task is running to
-  drain it.
-- WebRTC DataChannel / WebTransport / UDP-to-browser. No ESP32 library exists
-  for any of these, and browsers can't read raw UDP. Hard dead end.
-- Bluetooth LE notifications. Same 2.4 GHz radio, similar firmware blob, and
-  iOS Safari can't connect (no Web Bluetooth on iOS). Worse on every axis.
-
-### What the boot banner means
-
-```
-[INIT] Sensor task pinned to core 0.
-[WiFi] wifi_tx task on core 1 at priority 5
-========================================
-  Hostname: imuboard500
-  MAC:      A8:03:2A:5F:B2:E4
-  IP:       192.168.0.10
-========================================
-```
-
-Both lines are confirmations that the multi-task architecture started. If
-either is missing the system has fallen back to single-task mode and will
-freeze under motion — investigate before deploying.
-
-### Live diagnostics
-
-The `[STATS]` line printed once per second is the primary diagnostic. During
-a healthy run on a 50 Hz broadcast you should see:
-
-- `tx=50/s` consistently. Drops below ~45 indicate the broadcast is being
-  delayed.
-- `samples=190-200/s`. The IMU runs at 208 Hz; a small loss to skipped-`dt`
-  samples is normal.
-- `maxGap=21ms` (frame period). Anything > 100 ms is a stall worth
-  investigating; > 500 ms is back-to-the-old-bad-days and means the
-  `wifi_tx` task got preempted itself.
-
-A previous debugging build included extra `[STALL]` lines that attributed
-each stall to `imuUpd` / `wsLoop` / `send` / `http` durations and tagged
-whether one or both cores froze. That instrumentation was removed when the
-problem was resolved, but the code is in git history if a new class of
-stall ever appears.
+- **Arduino IDE flat sketch layout.** All `.cpp` / `.h` files live next to
+  the `.ino` in the project root (instead of `src/` and `include/` as on the
+  ESP32 PlatformIO build) so the Arduino preprocessor picks them up.

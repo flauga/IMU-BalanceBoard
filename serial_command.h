@@ -4,7 +4,7 @@
 #include "config.h"
 
 class IMUDriver;
-class WifiManager;
+class BleManager;
 
 class SerialCommand {
 public:
@@ -13,7 +13,7 @@ public:
 
     void setIMU(IMUDriver* imu)          { imu_       = imu; }
     void setStreamingFlag(bool* flag)    { streaming_ = flag; }
-    void setWifi(WifiManager* wifi)      { wifi_      = wifi; }
+    void setBle(BleManager* ble)         { ble_       = ble; }
 
     uint32_t getPrintIntervalMs() const  { return print_interval_ms_; }
     void     setPrintIntervalMs(uint32_t ms) { print_interval_ms_ = ms; }
@@ -25,7 +25,7 @@ private:
 
     IMUDriver*   imu_       = nullptr;
     bool*        streaming_ = nullptr;
-    WifiManager* wifi_      = nullptr;
+    BleManager*  ble_       = nullptr;
 
     uint32_t print_interval_ms_ = SERIAL_PRINT_INTERVAL_MS;
 
