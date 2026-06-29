@@ -13,6 +13,72 @@ extern void setDriftLog(bool on);
 extern void setSerialPrintEnabled(bool on);
 extern void setSerialPrintDivider(uint32_t div);
 
+// Runtime tuning + tilt-limit hooks (defined in the .ino). FilterMode lives in
+// config.h, already included above. captureLimit takes a LIMIT_* bit.
+extern void setFilterMode(FilterMode m);
+extern void setKp(float kp);
+extern void setVarThreshold(float v);
+extern void setEmaAlpha(float a);
+extern void captureLimit(uint8_t edge);
+extern void clearLimits();
+extern void persistTuning();
+extern int  buildTuningSnapshot(char* out, int cap);
+
+// LIMIT_* bits mirror the .ino definitions.
+static constexpr uint8_t L_FRONT = 0x01, L_BACK = 0x02, L_LEFT = 0x04, L_RIGHT = 0x08;
+
+// Lightweight decimal parser used instead of strtof/atof. The libc float-parse
+// path drags in deep newlib stack frames that overflow the small BLE-host task
+// stack these commands are dispatched on (the cause of the boot hard-fault).
+// Handles optional sign, integer + fractional parts; no exponent (not needed
+// for tuning values). Stops at the first non-numeric character.
+static float parseDecimal(const char* s) {
+    while (*s == ' ') s++;
+    bool neg = false;
+    if (*s == '+' || *s == '-') { neg = (*s == '-'); s++; }
+    double v = 0.0;
+    while (*s >= '0' && *s <= '9') { v = v * 10.0 + (*s - '0'); s++; }
+    if (*s == '.') {
+        s++;
+        double frac = 0.1;
+        while (*s >= '0' && *s <= '9') { v += (*s - '0') * frac; frac *= 0.1; s++; }
+    }
+    return (float)(neg ? -v : v);
+}
+
+// Shared command dispatcher used by BOTH the serial parser and the BLE command
+// handler, so the two never drift. Returns true if the command was recognised.
+// `cmd` must be a null-terminated, whitespace-trimmed string.
+bool dispatchTuningCommand(const char* cmd) {
+    if (strncasecmp(cmd, "MODE ", 5) == 0) {
+        const char* m = cmd + 5;
+        if      (strcasecmp(m, "fusion") == 0) setFilterMode(FilterMode::Fusion);
+        else if (strcasecmp(m, "gyro")   == 0) setFilterMode(FilterMode::Gyro);
+        else if (strcasecmp(m, "accel")  == 0) setFilterMode(FilterMode::Accel);
+        else Serial.printf("[CMD] Unknown mode '%s'\n", m);
+        return true;
+    } else if (strncasecmp(cmd, "KP ", 3) == 0) {
+        setKp(parseDecimal(cmd + 3));                   return true;
+    } else if (strncasecmp(cmd, "VAR ", 4) == 0) {
+        setVarThreshold(parseDecimal(cmd + 4));         return true;
+    } else if (strncasecmp(cmd, "EMA ", 4) == 0) {
+        setEmaAlpha(parseDecimal(cmd + 4));             return true;
+    } else if (strncasecmp(cmd, "LIMIT ", 6) == 0) {
+        const char* e = cmd + 6;
+        if      (strcasecmp(e, "FRONT") == 0) captureLimit(L_FRONT);
+        else if (strcasecmp(e, "BACK")  == 0) captureLimit(L_BACK);
+        else if (strcasecmp(e, "LEFT")  == 0) captureLimit(L_LEFT);
+        else if (strcasecmp(e, "RIGHT") == 0) captureLimit(L_RIGHT);
+        else Serial.printf("[CMD] Unknown limit edge '%s'\n", e);
+        return true;
+    } else if (strcasecmp(cmd, "LIMITCLEAR") == 0) {
+        clearLimits();                                  return true;
+    } else if (strcasecmp(cmd, "SAVE") == 0) {
+        persistTuning();                                return true;
+    }
+    return false;
+}
+
 void SerialCommand::begin() {
     buf_idx_ = 0;
 }
@@ -66,6 +132,8 @@ void SerialCommand::processCommand(const char* cmd) {
         int div = atoi(cmd + 11);
         if (div < 1) div = 1;
         setSerialPrintDivider((uint32_t)div);
+    } else if (dispatchTuningCommand(cmd)) {
+        // handled (MODE/KP/VAR/EMA/LIMIT/LIMITCLEAR/SAVE)
     } else {
         Serial.printf("[CMD] Unknown command: '%s'. Type HELP.\n", cmd);
     }
@@ -84,6 +152,13 @@ void SerialCommand::printHelp() {
     Serial.println("  SERIAL ON   Enable per-frame angle print on UART");
     Serial.println("  SERIAL OFF  Disable per-frame angle print on UART");
     Serial.println("  SERIAL DIV <n> Print 1 of every n frames (default 5)");
+    Serial.println("  MODE <m>    Filter source: fusion | gyro | accel");
+    Serial.println("  KP <v>      Mahony proportional gain (live)");
+    Serial.println("  VAR <v>     Motion-gate threshold g² (live)");
+    Serial.println("  EMA <v>     Output smoothing alpha 0.01-1 (live)");
+    Serial.println("  LIMIT <e>   Capture tilt edge: FRONT|BACK|LEFT|RIGHT");
+    Serial.println("  LIMITCLEAR  Forget captured tilt limits");
+    Serial.println("  SAVE        Persist tuning + tilt limits to NVM");
     Serial.println("  HELP        Show this help");
 }
 

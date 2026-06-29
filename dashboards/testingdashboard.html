@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>IMU Balance Board — BLE</title>
+<title>Testing Dashboard — IMU Balance Board (BLE)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
@@ -57,6 +57,7 @@ button:disabled { opacity: .3; cursor: not-allowed; }
 .btn-red   { background: var(--red-bg);   border-color: rgba(248,113,113,.3); color: var(--red); }
 .btn-red:hover   { background: rgba(248,113,113,.18); }
 .btn-amber { background: var(--amber-bg); border-color: rgba(251,191,36,.3);  color: var(--amber); }
+.cal-val { color: var(--accent, #60a5fa); }
 .btn-amber:hover { background: rgba(251,191,36,.18); }
 
 .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 14px 16px; margin-bottom: 12px; }
@@ -87,6 +88,19 @@ button:disabled { opacity: .3; cursor: not-allowed; }
 .ss-val { font-size: 22px; font-weight: 500; font-family: var(--mono); line-height: 1; color: var(--text); }
 .ss-unit { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-top: 3px; }
 
+.tune-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.tune-presets button { font-size: 12px; padding: 6px 12px; }
+.tune-rows { display: flex; flex-direction: column; gap: 12px; }
+.tune-row { display: grid; grid-template-columns: 110px 1fr 64px; align-items: center; gap: 12px; }
+.tune-row.disabled { opacity: .4; pointer-events: none; }
+.tune-name { font-size: 12px; font-weight: 500; color: var(--text2); }
+.tune-name small { display: block; font-size: 10px; color: var(--text3); font-weight: 400; margin-top: 2px; }
+.tune-row input[type=range] { width: 100%; accent-color: var(--blue); }
+.tune-val { font-family: var(--mono); font-size: 13px; color: var(--text); text-align: right; }
+.tune-mode { display: flex; gap: 6px; }
+.tune-mode button { flex: 1; font-size: 11px; padding: 6px 4px; }
+.tune-mode button.active { background: var(--blue-bg); border-color: rgba(96,165,250,.4); color: var(--blue); }
+
 .log { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r);
        height: 110px; overflow-y: auto; padding: 6px 10px; font-family: var(--mono); font-size: 11px; color: var(--text3); }
 .log-line { padding: 1px 0; }
@@ -97,8 +111,17 @@ button:disabled { opacity: .3; cursor: not-allowed; }
 </head>
 <body>
 
+<!-- Calibration-health warning. Hidden unless the board reports it needs
+     recalibration (TUNE snapshot trailing field != 0). -->
+<div id="cal-warn" style="display:none;position:fixed;top:0;left:0;right:0;z-index:200;
+     padding:10px 16px;text-align:center;font:600 14px/1.4 system-ui,sans-serif;
+     background:#7c2d12;color:#fed7aa;border-bottom:1px solid #b45309;
+     box-shadow:0 2px 10px rgba(0,0,0,.4);">
+  <span id="cal-warn-msg"></span>
+</div>
+
 <div class="header">
-  <h1>IMU Balance Board <span class="header-sub">— MG24 / BLE</span></h1>
+  <h1>Testing Dashboard <span class="header-sub">— IMU Balance Board / XIAO MG24 / BLE</span></h1>
   <div class="spacer"></div>
   <span class="pill" id="conn-pill">
     <span class="dot" id="conn-dot"></span>
@@ -114,6 +137,84 @@ button:disabled { opacity: .3; cursor: not-allowed; }
     <button id="btn-record"     disabled>Start session</button>
     <button id="btn-stop"       class="btn-red" disabled>Stop &amp; save CSV</button>
     <button id="btn-zero"       class="btn-amber" disabled>Zero</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Tuning</div>
+  <div id="tune-body" class="tune-rows" style="opacity:.4;pointer-events:none">
+    <div class="tune-presets">
+      <span class="tune-name" style="align-self:center">Presets:</span>
+      <button data-preset="responsive">Responsive</button>
+      <button data-preset="balanced">Balanced</button>
+      <button data-preset="smooth">Smooth</button>
+      <button data-preset="default">Default</button>
+    </div>
+
+    <div class="tune-row">
+      <div class="tune-name">Filter mode<small>source</small></div>
+      <div class="tune-mode" id="tune-mode">
+        <button data-mode="fusion" class="active">Fusion</button>
+        <button data-mode="gyro">Gyro</button>
+        <button data-mode="accel">Accel</button>
+      </div>
+      <div></div>
+    </div>
+
+    <div class="tune-row" id="row-kp">
+      <div class="tune-name">Kp<small>re-level speed</small></div>
+      <input type="range" id="t-kp" min="0" max="6" step="0.1" value="1.2">
+      <div class="tune-val" id="t-kp-val">1.2</div>
+    </div>
+
+    <div class="tune-row" id="row-var">
+      <div class="tune-name">Motion gate<small>g², higher = less lag</small></div>
+      <input type="range" id="t-var" min="0.0005" max="0.05" step="0.0005" value="0.002">
+      <div class="tune-val" id="t-var-val">0.0020</div>
+    </div>
+
+    <div class="tune-row" id="row-ema">
+      <div class="tune-name">Smoothing<small>EMA α, higher = less lag</small></div>
+      <input type="range" id="t-ema" min="0.05" max="1" step="0.05" value="0.5">
+      <div class="tune-val" id="t-ema-val">0.50</div>
+    </div>
+
+    <div class="tune-row" id="row-save">
+      <div class="tune-name">Persist<small>freeze to device</small></div>
+      <button id="btn-save" class="btn-green">Save to device</button>
+      <div class="tune-val" id="save-status" style="font-size:12px;color:var(--text2)">unsaved</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Tilt range limits</div>
+  <div id="limit-body" class="tune-rows" style="opacity:.4;pointer-events:none">
+    <div style="font-size:12px;color:var(--text2);margin-bottom:4px">
+      Tilt the board to each comfortable extreme and press the matching button.
+      Limits are stored <b>on the device</b> and shared with every game.
+      Press <b>Save to device</b> above to persist them across power cycles.
+    </div>
+    <div class="lim-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <button id="lim-front" class="btn-amber">Set front (pitch +)</button>
+      <button id="lim-back"  class="btn-amber">Set back (pitch −)</button>
+      <button id="lim-left"  class="btn-amber">Set left (roll −)</button>
+      <button id="lim-right" class="btn-amber">Set right (roll +)</button>
+    </div>
+    <div class="lim-readout" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;
+         margin-top:10px;font-size:13px;font-variant-numeric:tabular-nums">
+      <span>Front: <b id="lim-front-v" class="cal-val">—</b>°</span>
+      <span>Back: <b id="lim-back-v" class="cal-val">—</b>°</span>
+      <span>Left: <b id="lim-left-v" class="cal-val">—</b>°</span>
+      <span>Right: <b id="lim-right-v" class="cal-val">—</b>°</span>
+      <span>Centre pitch: <b id="lim-cp-v" class="cal-val">—</b>°</span>
+      <span>Centre roll: <b id="lim-cr-v" class="cal-val">—</b>°</span>
+    </div>
+    <div class="tune-row" style="margin-top:8px">
+      <div class="tune-name">Range<small>clear & re-capture</small></div>
+      <button id="lim-clear" class="btn-red">Clear limits</button>
+      <div class="tune-val" id="lim-status" style="font-size:12px;color:var(--text2)">—</div>
+    </div>
   </div>
 </div>
 
@@ -148,6 +249,11 @@ button:disabled { opacity: .3; cursor: not-allowed; }
       <input type="range" id="max-angle-slider" min="5" max="90" value="30" step="5" style="width:160px">
       <span id="max-angle-label">±30°</span>
       <button id="zoom-in" title="Zoom in">+</button>
+    </div>
+    <div class="scale-row">
+      <span title="Render-side easing of the dot only. Lower = smoother (hides BLE stutter, slight lag). 1.0 = off. Tiles/CSV stay raw.">Dot smoothing:</span>
+      <input type="range" id="dot-smooth-slider" min="0.08" max="1" value="0.35" step="0.02" style="width:160px">
+      <span id="dot-smooth-label">0.35</span>
     </div>
   </div>
 </div>
@@ -206,13 +312,21 @@ let connected  = false;
 
 function setConnected(yes) {
   connected = yes;
+  if (!yes) setCalHealth(0);   // clear any calibration warning when the link drops
   $('conn-dot').className  = yes ? 'dot on' : 'dot';
   $('conn-text').textContent = yes ? 'connected' : 'disconnected';
   $('btn-connect').disabled    = yes;
   $('btn-disconnect').disabled = !yes;
   $('btn-record').disabled     = !yes;
   $('btn-zero').disabled       = !yes;
+  $('btn-save').disabled       = !yes;
   // Stop button is only enabled while recording — handled separately.
+  const tb = $('tune-body');
+  tb.style.opacity = yes ? '1' : '.4';
+  tb.style.pointerEvents = yes ? 'auto' : 'none';
+  const lb = $('limit-body');
+  lb.style.opacity = yes ? '1' : '.4';
+  lb.style.pointerEvents = yes ? 'auto' : 'none';
 }
 
 if (!navigator.bluetooth) {
@@ -238,6 +352,10 @@ $('btn-connect').addEventListener('click', async () => {
     setConnected(true);
     resetAllVisualsAndAccumulators();
     log('Connected. Streaming.', 'ok');
+    // The command characteristic is READABLE: the board reports its current live
+    // tuning + tilt limits as a CSV snapshot. Read it and sync the UI to the
+    // board's saved values rather than overwriting them with slider defaults.
+    await syncFromDevice();
   } catch (e) {
     log('Connect failed: ' + e.message, 'err');
     setConnected(false);
@@ -266,6 +384,242 @@ async function sendCmd(text) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Live tuning. The board exposes KP / VAR / EMA / MODE over the command
+// characteristic. The characteristic is write-only (no BLE read-back), so the
+// sliders are the source of truth — on connect we push the current values so
+// firmware and UI are guaranteed in sync, then push on every change.
+//
+//   Kp    — Mahony proportional gain. Higher = the estimate snaps back to the
+//           true gravity pose faster after you stop moving.
+//   var   — motion-variance gate (g²). Higher = accel keeps correcting while
+//           the board is moving, so there's less lag returning to a held pose.
+//   ema   — output smoothing. Higher = less display smoothing lag.
+// ───────────────────────────────────────────────────────────────────────────
+let curMode = 'fusion';
+
+const TUNE_PRESETS = {
+  responsive: { kp: 3.0, var: 0.010,  ema: 0.8 },  // minimal lag, more jitter
+  balanced:   { kp: 2.0, var: 0.005,  ema: 0.6 },
+  smooth:     { kp: 0.8, var: 0.0015, ema: 0.35 }, // very smooth, more lag
+  default:    { kp: 1.2, var: 0.002,  ema: 0.5 },  // firmware boot defaults
+};
+
+function fmtVar(v) { return Number(v).toFixed(4); }
+
+function setKpSlider(v)  { $('t-kp').value  = v; $('t-kp-val').textContent  = Number(v).toFixed(1); }
+function setVarSlider(v) { $('t-var').value = v; $('t-var-val').textContent = fmtVar(v); }
+function setEmaSlider(v) { $('t-ema').value = v; $('t-ema-val').textContent = Number(v).toFixed(2); }
+
+function setModeButtons(mode) {
+  curMode = mode;
+  for (const b of $('tune-mode').querySelectorAll('button'))
+    b.classList.toggle('active', b.dataset.mode === mode);
+  // Kp / motion-gate only act in fusion mode — dim them otherwise.
+  const fusion = mode === 'fusion';
+  $('row-kp').classList.toggle('disabled', !fusion);
+  $('row-var').classList.toggle('disabled', !fusion);
+}
+
+// Push every current control value to the board (used on connect + presets).
+async function pushAllTuning() {
+  await sendCmd('MODE ' + curMode);
+  await sendCmd('KP '  + Number($('t-kp').value).toFixed(2));
+  await sendCmd('VAR ' + Number($('t-var').value).toFixed(4));
+  await sendCmd('EMA ' + Number($('t-ema').value).toFixed(2));
+}
+
+function applyPreset(name) {
+  const p = TUNE_PRESETS[name];
+  if (!p) return;
+  setKpSlider(p.kp); setVarSlider(p.var); setEmaSlider(p.ema);
+  if (connected) {
+    sendCmd('KP '  + p.kp.toFixed(2));
+    sendCmd('VAR ' + p.var.toFixed(4));
+    sendCmd('EMA ' + p.ema.toFixed(2));
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tilt range limits. Captured on the device (LIMIT FRONT/BACK/LEFT/RIGHT) and
+// stored in its NVM so every game reads the same calibration. `limits` mirrors
+// the board's snapshot; `limitMask` is the bitmask of which are set (bit0 front,
+// bit1 back, bit2 left, bit3 right). Centre is the midpoint of each pair.
+// ───────────────────────────────────────────────────────────────────────────
+const LIM = { FRONT:1, BACK:2, LEFT:4, RIGHT:8 };
+let limits    = { front:0, back:0, left:0, right:0 };
+let limitMask = 0;
+
+function fmtLim(v, bit) { return (limitMask & bit) ? Number(v).toFixed(1) : '—'; }
+function refreshLimits() {
+  $('lim-front-v').textContent = fmtLim(limits.front, LIM.FRONT);
+  $('lim-back-v') .textContent = fmtLim(limits.back,  LIM.BACK);
+  $('lim-left-v') .textContent = fmtLim(limits.left,  LIM.LEFT);
+  $('lim-right-v').textContent = fmtLim(limits.right, LIM.RIGHT);
+  // Centre pitch needs both front+back; centre roll needs both left+right.
+  const haveP = (limitMask & LIM.FRONT) && (limitMask & LIM.BACK);
+  const haveR = (limitMask & LIM.LEFT)  && (limitMask & LIM.RIGHT);
+  $('lim-cp-v').textContent = haveP ? ((limits.front+limits.back)/2).toFixed(1) : '—';
+  $('lim-cr-v').textContent = haveR ? ((limits.left +limits.right)/2).toFixed(1) : '—';
+  const n = ['FRONT','BACK','LEFT','RIGHT'].filter(k => limitMask & LIM[k]).length;
+  $('lim-status').textContent = n ? (n + '/4 set' + (n<4?' (unsaved*)':'')) : 'none set';
+}
+
+// ── Calibration-health. Shown ONLY when the board reports its sensor has drifted
+// out of calibration (snapshot health field 1 = gyro-bias drift; 0 = healthy).
+// This is the testing dashboard, so it also LOGS the reason in the bottom log
+// (on transitions only, so the 5 s poll doesn't spam it). The games show just
+// the banner — they don't carry this engineering log.
+let calHealthLast = 0;
+function setCalHealth(code) {
+  const el = $('cal-warn'); if (!el) return;
+  const msg = code === 1 ? 'Sensor drift detected — re-zero the board (Zero button) to recalibrate.' : '';
+  if (msg) { $('cal-warn-msg').textContent = '⚠ ' + msg; el.style.display = 'block'; }
+  else     { el.style.display = 'none'; }
+  // Log only when the state changes, with a plain-language reason.
+  if (code !== calHealthLast) {
+    if (code === 1) {
+      log('Calibration health: gyro-bias drift detected — the filter is persistently correcting a large bias. Press Zero (board flat & still) to recalibrate.', 'warn');
+    } else if (calHealthLast !== 0) {
+      log('Calibration health: back to normal — sensor drift cleared.', 'ok');
+    }
+    calHealthLast = code;
+  }
+}
+// Poll the snapshot slowly while connected so a flag that appears mid-session is
+// caught and auto-cleared. Light: one short read every 5 s.
+setInterval(async () => {
+  if (!connected || !cmdChar) return;
+  try {
+    const p = new TextDecoder().decode(await cmdChar.readValue()).split(',');
+    if (p[0] === 'TUNE' && p.length > 10) setCalHealth(+p[10] | 0);
+  } catch {}
+}, 5000);
+
+// Read the board's snapshot ("TUNE,mode,kp,var,ema,front,back,left,right,mask,health")
+// and sync every UI control to it. Falls back gracefully if the read fails
+// (e.g. older firmware) by pushing the slider state instead.
+async function syncFromDevice() {
+  try {
+    const dv = await cmdChar.readValue();
+    const txt = new TextDecoder().decode(dv);
+    const p = txt.split(',');
+    if (p[0] !== 'TUNE' || p.length < 10) throw new Error('unexpected snapshot: ' + txt);
+    const mode = p[1];
+    const kp = +p[2], vr = +p[3], ema = +p[4];
+    limits = { front:+p[5], back:+p[6], left:+p[7], right:+p[8] };
+    limitMask = +p[9] | 0;
+    setModeButtons(['fusion','gyro','accel'].includes(mode) ? mode : 'fusion');
+    setKpSlider(kp); setVarSlider(vr); setEmaSlider(ema);
+    refreshLimits();
+    setCalHealth(p.length > 10 ? (+p[10] | 0) : 0);   // trailing health field (older fw omits it)
+    markSaved();   // what's on screen IS what's saved on the device
+    log(`Synced from device: mode=${mode} kp=${kp.toFixed(2)} var=${vr.toFixed(4)} ema=${ema.toFixed(2)}; limits ${$('lim-status').textContent}`, 'ok');
+  } catch (e) {
+    log('Read-back failed (' + e.message + ') — pushing UI defaults instead.', 'warn');
+    await pushAllTuning();
+    markUnsaved();
+  }
+}
+
+// Save-state tracking. Changing any tuning value only affects the LIVE settings
+// on the board (non-destructive experimentation); it does NOT persist. The
+// status label flips to "unsaved*" so it's clear the change won't survive a
+// reboot/sleep until "Save to device" is pressed (firmware SAVE → flash).
+function markUnsaved() {
+  const s = $('save-status');
+  s.textContent = 'unsaved*';
+  s.style.color = 'var(--amber, #f59e0b)';
+}
+function markSaved() {
+  const s = $('save-status');
+  s.textContent = 'saved ✓';
+  s.style.color = 'var(--green, #4ade80)';
+}
+
+// Sliders: update the label live (input), send to the board on release
+// (change) so we don't flood the BLE link with intermediate values.
+$('t-kp') .addEventListener('input', () => $('t-kp-val') .textContent = Number($('t-kp').value).toFixed(1));
+$('t-var').addEventListener('input', () => $('t-var-val').textContent = fmtVar($('t-var').value));
+$('t-ema').addEventListener('input', () => $('t-ema-val').textContent = Number($('t-ema').value).toFixed(2));
+$('t-kp') .addEventListener('change', () => { if(connected){ sendCmd('KP '  + Number($('t-kp').value).toFixed(2)); markUnsaved(); } });
+$('t-var').addEventListener('change', () => { if(connected){ sendCmd('VAR ' + Number($('t-var').value).toFixed(4)); markUnsaved(); } });
+$('t-ema').addEventListener('change', () => { if(connected){ sendCmd('EMA ' + Number($('t-ema').value).toFixed(2)); markUnsaved(); } });
+
+for (const b of $('tune-mode').querySelectorAll('button')) {
+  b.addEventListener('click', () => {
+    setModeButtons(b.dataset.mode);
+    if (connected) { sendCmd('MODE ' + b.dataset.mode); markUnsaved(); }
+  });
+}
+for (const b of document.querySelectorAll('.tune-presets button'))
+  b.addEventListener('click', () => { applyPreset(b.dataset.preset); if(connected) markUnsaved(); });
+
+// Save to device: freeze the current live tuning AND tilt limits to NVM
+// (firmware SAVE persists both in one record).
+$('btn-save').addEventListener('click', async () => {
+  if (!connected) return;
+  await sendCmd('SAVE');
+  markSaved();
+  // Mark limits as the saved baseline too (drop any "(unsaved*)" hint).
+  refreshLimits();
+  log('Tuning + tilt limits frozen to device — persist across power cycles.', 'ok');
+});
+
+// ── Tilt-range limit capture. The firmware now stores the AVERAGE of the last
+// ~0.5 s of a settled hold (not one instantaneous sample) and REJECTS the
+// capture if the board was still wobbling. So after sending LIMIT we re-read the
+// snapshot and reflect the board's actual stored value / mask, rather than
+// optimistically trusting the last streamed frame. Limits persist on Save.
+async function captureLimit(edge, bit, value) {
+  if (!connected) return;
+  await sendCmd('LIMIT ' + edge);
+  // Give the firmware a moment to process the write + republish the snapshot.
+  await new Promise(r => setTimeout(r, 140));
+  try {
+    const p = new TextDecoder().decode(await cmdChar.readValue()).split(',');
+    if (p[0] !== 'TUNE' || p.length < 10) throw new Error('bad snapshot');
+    limits = { front:+p[5], back:+p[6], left:+p[7], right:+p[8] };
+    const newMask = (+p[9]) | 0;
+    const wasSet = (limitMask & bit) !== 0;
+    limitMask = newMask;
+    refreshLimits();
+    if (newMask & bit) {
+      markUnsaved();
+      log(`${edge} limit captured at ${limits[edge.toLowerCase()].toFixed(1)}° (averaged · Save to persist)`, 'ok');
+    } else if (!wasSet) {
+      // Firmware left the bit clear → it rejected the capture (still moving).
+      log(`${edge} not captured — hold steadier and try again.`, 'warn');
+    } else {
+      log(`${edge} unchanged — hold steadier and try again.`, 'warn');
+    }
+  } catch (e) {
+    // Read-back failed: fall back to the old optimistic mirror so the UI still moves.
+    limits[edge.toLowerCase()] = value;
+    limitMask |= bit;
+    refreshLimits();
+    markUnsaved();
+    log(`${edge} limit sent (read-back failed: ${e.message}). Save to persist.`, 'warn');
+  }
+}
+$('lim-front').addEventListener('click', () => captureLimit('FRONT', LIM.FRONT, lastPitch));
+$('lim-back') .addEventListener('click', () => captureLimit('BACK',  LIM.BACK,  lastPitch));
+$('lim-left') .addEventListener('click', () => captureLimit('LEFT',  LIM.LEFT,  lastRoll));
+$('lim-right').addEventListener('click', () => captureLimit('RIGHT', LIM.RIGHT, lastRoll));
+$('lim-clear').addEventListener('click', () => {
+  if (!connected) return;
+  sendCmd('LIMITCLEAR');
+  limits = { front:0, back:0, left:0, right:0 };
+  limitMask = 0;
+  refreshLimits();
+  markUnsaved();
+  log('Limits cleared (Save to persist the cleared state).');
+});
+
+// Initialise the mode-dependent dimming to match the default (fusion).
+setModeButtons('fusion');
+refreshLimits();
+
+// ───────────────────────────────────────────────────────────────────────────
 // Frame unpacking. The firmware emits a 16-byte LE struct
 // (uint32 ms + 3× float32). On a local BLE notify link jitter is tiny, so
 // we skip the device-time playhead the ESP32 WiFi dashboard used (that
@@ -277,6 +631,18 @@ const PENDING_FRAMES = [];
 let firstDeviceMs    = 0;
 let haveFirstDeviceMs = false;
 let lastRoll = 0, lastPitch = 0;
+// Render-side smoothing for the DOT only. This is a tuning dashboard, so the
+// v-roll/v-pitch tiles, the chart and the CSV stay RAW (you're inspecting the
+// real filter output). But the plotted dot eases toward the latest reading each
+// frame so BLE burst/batching (frames arriving in clumps) shows as a smooth
+// glide instead of a freeze-then-snap. DOT_SMOOTH: per-frame easing toward raw;
+// 1 = off (raw, shows BLE stutter), lower = smoother but adds a little visual lag.
+let dispRoll = 0, dispPitch = 0;
+// Default raised 0.35 → 0.8 (key bumped v1→v2 so the new default reaches users who
+// saved the old value): the BLE burst this easing existed to hide is now fixed at
+// source by the 15 ms connection interval, so the easing was mostly pure input lag
+// (~39 ms at 0.35 vs ~10 ms at 0.8). Tiles/chart/CSV stay RAW; this is the dot only.
+let DOT_SMOOTH = (() => { const v = parseFloat(localStorage.getItem('td_dotsmooth_v2')); return (v>=0.05 && v<=1) ? v : 0.8; })();
 
 function onAngles(evt) {
   const dv = evt.target.value;
@@ -296,7 +662,7 @@ const tiltCanvas = $('tiltCanvas');
 const tiltCtx    = tiltCanvas.getContext('2d');
 let   maxAngle   = 30;
 
-const TRAIL_LEN  = 600;        // ~12 s at 50 Hz
+const TRAIL_LEN  = 600;        // ~9 s at 66 Hz
 const trailRoll  = new Float32Array(TRAIL_LEN);
 const trailPitch = new Float32Array(TRAIL_LEN);
 let   trailHead  = 0;
@@ -406,9 +772,20 @@ function setMaxAngle(v) {
   maxAngle = v;
   $('max-angle-slider').value = v;
   $('max-angle-label').textContent = `±${v}°`;
-  drawTiltPlot(lastRoll, lastPitch);
+  drawTiltPlot(dispRoll, dispPitch);
 }
 $('max-angle-slider').addEventListener('input', () => setMaxAngle(Number($('max-angle-slider').value)));
+// Dot-smoothing slider — render-side easing of the plotted dot (client-side only).
+if ($('dot-smooth-slider')) {
+  const ds = $('dot-smooth-slider'), dl = $('dot-smooth-label');
+  ds.value = DOT_SMOOTH;
+  if (dl) dl.textContent = DOT_SMOOTH >= 0.99 ? 'off' : DOT_SMOOTH.toFixed(2);
+  ds.addEventListener('input', () => {
+    DOT_SMOOTH = Number(ds.value);
+    if (dl) dl.textContent = DOT_SMOOTH >= 0.99 ? 'off' : DOT_SMOOTH.toFixed(2);
+  });
+  ds.addEventListener('change', () => { try { localStorage.setItem('td_dotsmooth_v2', String(DOT_SMOOTH)); } catch {} });
+}
 $('zoom-in') .addEventListener('click', () => setMaxAngle(maxAngle - 5));
 $('zoom-out').addEventListener('click', () => setMaxAngle(maxAngle + 5));
 
@@ -576,14 +953,14 @@ function resetAllVisualsAndAccumulators() {
     ['labels','roll','pitch'].forEach(k => { chartData[k].length = 0; });
     chartDirty = true;
   }
-  lastRoll = 0; lastPitch = 0;
+  lastRoll = 0; lastPitch = 0; dispRoll = 0; dispPitch = 0;
   drawTiltPlot(0, 0);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // Chart.js tilt-vs-time, 20 Hz redraw cap.
 // ───────────────────────────────────────────────────────────────────────────
-const MAX_CHART = 250;             // ~5 s at 50 Hz
+const MAX_CHART = 250;             // ~3.8 s at 66 Hz
 const chartData = { labels: [], roll: [], pitch: [] };
 let   chart      = null;
 let   chartDirty = false;
@@ -711,7 +1088,13 @@ function pushChartPoint(elapsed, roll, pitch) {
     $('ss-sway').textContent = e ? e.area.toFixed(2) : '–';
   }
 
-  drawTiltPlot(lastRoll, lastPitch);
+  // Ease the DOT toward the latest raw value (tiles/chart/CSV remain raw above).
+  // At DOT_SMOOTH=1 this is identity. Turns BLE burst-then-stall into a glide.
+  const a = DOT_SMOOTH;
+  dispRoll  += (lastRoll  - dispRoll ) * a;
+  dispPitch += (lastPitch - dispPitch) * a;
+
+  drawTiltPlot(dispRoll, dispPitch);
 })();
 
 // First paint.

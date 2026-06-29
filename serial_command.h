@@ -6,6 +6,12 @@
 class IMUDriver;
 class BleManager;
 
+// Shared command dispatcher for the runtime tuning + tilt-limit commands
+// (MODE/KP/VAR/EMA/LIMIT/LIMITCLEAR/SAVE). Used by both the serial parser and
+// the BLE command handler so they stay in lockstep. `cmd` must be a
+// null-terminated, whitespace-trimmed string. Returns true if recognised.
+bool dispatchTuningCommand(const char* cmd);
+
 class SerialCommand {
 public:
     void begin();

@@ -28,9 +28,19 @@ public:
     // Updated each call to update(); used by diagnostic logs.
     float getLastTrust() const { return last_trust_; }
 
+    // Runtime-tunable gains (live, non-destructive). Boot defaults come from
+    // config.h; the dashboard can adjust these over BLE and persist them.
+    void  setKp(float kp)              { kp_ = kp; }
+    float getKp() const                { return kp_; }
+    void  setVarThreshold(float v)     { var_thresh_ = (v > 1e-9f) ? v : 1e-9f; }
+    float getVarThreshold() const      { return var_thresh_; }
+
 private:
     float q0_ = 1.0f, q1_ = 0.0f, q2_ = 0.0f, q3_ = 0.0f;
     float bx_ = 0.0f, by_ = 0.0f, bz_ = 0.0f;  // integral bias estimate
+
+    float kp_         = MAHONY_KP;             // live proportional gain
+    float var_thresh_ = MAHONY_VAR_THRESHOLD;  // live motion-gate threshold (g²)
 
     float   var_win_[MAHONY_VAR_WINDOW] = {};
     float   var_sum_    = 0.0f;

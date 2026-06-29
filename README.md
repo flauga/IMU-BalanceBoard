@@ -50,10 +50,18 @@ gravity-referenced.
 
 | Constant | Default | Effect |
 |---|---|---|
-| `MAHONY_KP` | 0.5 | Proportional gain — higher = accel corrects faster, more noise |
-| `MAHONY_KI` | 0.00005 | Integral gain — higher = removes bias faster |
+| `MAHONY_KP` | 1.2 | Proportional gain — higher = accel re-levels faster after motion, more noise. Live-tunable via `KP <v>`. |
+| `MAHONY_KI` | 0.00005 | Integral gain — higher = removes gyro bias faster |
 | `MAHONY_ACCEL_GATE` | 4.0 | Sharpness of magnitude gate |
-| `MAHONY_VAR_THRESHOLD` | 0.002 g² | Above this variance = motion detected, accel ignored |
+| `MAHONY_VAR_THRESHOLD` | 0.002 g² | Above this variance = motion detected, accel ignored. Live-tunable via `VAR <v>`. |
+| `EMA_ALPHA_DEFAULT` | 0.5 | Output smoothing — higher = less lag, less smooth. Live-tunable via `EMA <a>`. |
+| Filter mode | fusion | Boot filter source: fusion / gyro / accel. Live-tunable via `MODE <m>`. |
+
+These are only the *boot* defaults. Live changes via `KP` / `VAR` / `EMA` /
+`MODE` (serial or BLE) are non-destructive — they affect the running filter but
+do **not** touch flash, so they reset on the next boot. Issue `SAVE` to freeze
+the current live tuning to on-chip NVM; that saved set then reloads on every
+subsequent boot and survives power cycles.
 
 ## Building
 
@@ -63,7 +71,8 @@ gravity-referenced.
 2. Add the SiliconLabs board-manager URL in Preferences:
    `https://siliconlabs.github.io/arduino/package_arduinosilabs_index.json`
 3. Open **Tools → Board → Boards Manager**, search for "Silicon Labs", and
-   install the `Silicon Labs` core (version 3.0.0 or later).
+   install the `Silicon Labs` core (version 3.0.0; the bundled `sketch.yaml`
+   profile pins this version).
 4. Open **Sketch → Include Library → Manage Libraries**, search for
    `Seeed Arduino LSM6DS3` and install it.
 
@@ -89,8 +98,8 @@ With `arduino-cli` (a `sketch.yaml` profile is included):
 
 ```bash
 arduino-cli compile --profile xiao_mg24
-arduino-cli compile --profile xiao_mg24 -u -p COM7        # adjust port
-arduino-cli monitor -p COM7 -c baudrate=115200
+arduino-cli compile --profile xiao_mg24 -u -p COM11       # adjust port
+arduino-cli monitor -p COM11 -c baudrate=115200
 ```
 
 ### Why not PlatformIO?
@@ -114,13 +123,62 @@ attempt; the patching plan is sketched there.
 On boot the MG24 advertises a custom GATT service as `IMUBoard-MG24`. Any
 Web-Bluetooth client (Chrome / Edge on desktop or Android, Bluefy on iOS)
 that subscribes to the angles characteristic will receive notifications at
-50 Hz.
+the configured output rate (default 50 Hz; adjustable 1–50 Hz via `RATE`).
 
-A ready-to-use dashboard is shipped in this repo as
-[dashboard.html](dashboard.html). It runs entirely client-side, no server
-needed. You can use it two ways:
+The ready-to-use clients are shipped in this repo under
+[`dashboards/`](dashboards/). They run entirely client-side, no server needed.
 
-- **Locally** — double-click `dashboard.html` in Windows Explorer to open it
+> **Calibrate once, on the board — never per game.** The per-user tilt range
+> (front / back / left / right) is captured a single time in the testing
+> dashboard and frozen to the board's NVM with `SAVE`. Every game then **reads
+> that range from the board on connect** via the readable command
+> characteristic and adapts itself to it. No game asks you to lean-calibrate at
+> the start of a session, and the same range follows the board to any phone or
+> laptop. (At most, each game has a hideable options menu for fine-tuning.)
+
+- **[dashboards/testingdashboard.html](dashboards/testingdashboard.html)** — the
+  full tuning + data dashboard (live tiles, zoomable tilt plot, tilt-vs-time
+  chart, session metrics, CSV export, and live Kp / motion-gate / smoothing /
+  mode sliders with a **Save to device** button). On connect it **reads the
+  board's saved tuning** and syncs every control to it (so what you see is
+  what's stored, not UI defaults). It is also where you **capture the tilt
+  range** — lean to each edge, tap front / back / left / right, then **Save** —
+  which is stored on the board and shared with every game. This is the *only*
+  place calibration happens.
+- **[dashboards/steadysteps.html](dashboards/steadysteps.html)** — **SteadySteps**,
+  the patient-facing game app. A Duolingo-style path of **five levels** trains
+  forward/back standing balance over **one shared BLE connection** (connect once;
+  every level plays without reconnecting):
+  1. **HOLD** — keep the dot in a generous box.
+  2. **STEADY** — the box slowly tightens.
+  3. **FOLLOW** — the box slowly floats up and down.
+  4. **TRACK** — a target glides up and down; keep your dot on it.
+  5. **FLIGHT** — a continuous flyer: your dino's height tracks your lean; rise
+     over the trees, drop under the other dinos. Distance is the score.
+
+  It **reads the board's saved forward/back range** on connect and maps the
+  player's real lean to the dot (centre = midpoint of front/back, full travel =
+  their reach). Detection is automatic: with a range saved it goes straight to
+  the level path; with none it shows a one-time "set your range in the testing
+  dashboard" screen and **advances on its own** once the range is saved — there
+  is no calibrate-here step and no recheck button. The **only** calibration
+  prompt anywhere is a warning banner that appears solely when the board reports
+  it has drifted (health flag) and links to the testing dashboard.
+
+  Levels normally unlock by mastering the previous one. An operator can tap
+  **🔓 Unlock all** on the menu and enter the password (`claude1`) to unlock
+  every level regardless of progress; the unlock persists in the browser. The
+  same unlock reveals a hidden **⚙ Options** panel on the FLIGHT level with live
+  difficulty sliders (scroll speed, obstacle spacing, gap size, etc.). Until
+  unlocked, no options or tuning UI is shown anywhere.
+
+  > The standalone **Ferra Balance** pro game and the separate Chrome-dino game
+  > have been retired — the dino is now FLIGHT (level 5) inside SteadySteps, and
+  > all advanced/engineering tuning lives in the testing dashboard.
+
+You can use these two ways:
+
+- **Locally** — double-click the `.html` file in Windows Explorer to open it
   in your default browser.
 - **Hosted** — a copy is published over HTTPS at
   **<https://flauga.github.io/IMU-BalanceBoard/>** (served from the
@@ -169,7 +227,31 @@ Columns: `timestamp, elapsed_s, device_ms, roll_deg, pitch_deg, yaw_deg`
 |---|---|---|
 | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | Service | "IMU Balance Board" |
 | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | Notify (16 B) | `{ uint32 ms; float roll; float pitch; float yaw }` little-endian |
-| `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | Write | UTF-8 command string (see below) |
+| `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | Write **+ Read** | Write: UTF-8 command string (below). Read: live tuning + limit snapshot (below). |
+
+### Tuning / limit snapshot (command-char read)
+
+The command characteristic is **readable** as well as writable. A read returns a
+compact CSV snapshot of the board's current live state so any client can sync
+its UI to the board's saved values on connect (rather than overwriting them):
+
+```
+TUNE,<mode>,<kp>,<var>,<ema>,<front>,<back>,<left>,<right>,<setmask>,<health>
+```
+
+e.g. `TUNE,fusion,1.20,0.0020,0.50,12.0,-10.0,8.0,-9.0,15,0`. `setmask` is a
+bitmask of which limits are captured (bit0 front, bit1 back, bit2 left, bit3
+right; `15` = all four). All shipped dashboards read this on connect.
+
+`<health>` is a **calibration-health** code (`0` = OK, `1` = gyro-bias drift
+suspected) derived at runtime from the magnitude of the Mahony integral
+correction term — it flags a sensor that has drifted enough to warrant a re-zero,
+and never trips merely from leaning the board. It is a trailing field, so older
+clients that read only fields 0–9 ignore it (backward compatible). Every
+dashboard shows a re-zero banner while it is non-zero; the testing dashboard also
+logs the reason. The tilt **limits** are captured as the average of the last
+~0.5 s of a steady hold (a capture taken while the board is still wobbling is
+rejected), so a saved edge reflects a settled lean rather than one noisy sample.
 
 The binary frame is identical to the ESP32 firmware's `BIN ON` mode, so
 existing Web-Bluetooth dashboards built for that wire format work unchanged
@@ -183,8 +265,28 @@ The command characteristic accepts the same text commands as the UART:
 |---|---|
 | `START` / `STOP` | Begin / pause streaming |
 | `ZERO` | Reset orientation reference to current pose (persisted to NVM — survives power cycles) |
+| `ZEROCLEAR` | Forget the saved zero; next boot captures the boot pose **only if it passes a plausibility gate** (board flat & still), otherwise the zero is deferred until you run `ZERO` |
+| `SAVE` | Freeze current tuning (Kp / VAR / EMA / MODE) **and tilt limits** to NVM — survives power cycles |
+| `LIMIT <FRONT\|BACK\|LEFT\|RIGHT>` | Capture the current tilt as that range limit (front/back = pitch, left/right = roll) |
+| `LIMITCLEAR` | Forget the captured tilt limits |
 | `DEBUG ON` / `DEBUG OFF` | Toggle 1 Hz drift-diagnostic log |
 | `RATE <hz>` | Set output rate 1–50 Hz |
+| `MODE <fusion\|gyro\|accel>` | Orientation filter source |
+| `KP <value>` | Mahony accel gain (fusion mode); higher = faster re-level |
+| `VAR <g²>` | Motion-variance gate; higher = accel keeps correcting during motion (less lag) |
+| `EMA <alpha>` | Output smoothing 0.01–1.0; higher = less smoothing lag |
+
+The full UART command set — including `SAVE`, `LIMIT …` and `LIMITCLEAR` — is
+also accepted over BLE, so the board can be fully driven from a Web-Bluetooth
+client with no serial cable.
+
+The testing dashboard exposes all four tuning knobs (Kp / motion gate /
+smoothing / filter mode) as live sliders with presets — no reflash needed to
+tune — plus a **Save to device** button that issues `SAVE`. Because the command
+characteristic is **readable**, the dashboard reads the board's current values
+on connect and syncs its controls to them, instead of overwriting the board with
+UI defaults. `SAVE` persists the tuning **and** the captured tilt limits together
+in one NVM record, so both survive power cycles.
 
 ## Serial Commands
 
@@ -196,9 +298,17 @@ Identical to the ESP32 firmware:
 | `STATUS` | Show firmware version, BLE status, etc. |
 | `RATE <hz>` | Set output rate 1–50 Hz (default 50 Hz) |
 | `ZERO` | Reset orientation reference to current pose (persisted to NVM — survives power cycles) |
+| `ZEROCLEAR` | Forget the saved zero; next boot captures the boot pose **only if it passes a plausibility gate** (board flat & still), otherwise the zero is deferred until you run `ZERO` |
+| `SAVE` | Freeze current tuning (Kp / VAR / EMA / MODE) **and tilt limits** to NVM — survives power cycles |
+| `LIMIT <FRONT\|BACK\|LEFT\|RIGHT>` | Capture the current tilt as that range limit |
+| `LIMITCLEAR` | Forget the captured tilt limits |
 | `DEBUG ON` / `DEBUG OFF` | Toggle 1 Hz drift-diagnostic log |
 | `SERIAL ON` / `SERIAL OFF` | Toggle per-frame angle prints on the UART |
 | `SERIAL DIV <n>` | Print 1 of every n frames (default 5 = ~10 Hz UART) |
+| `MODE <fusion\|gyro\|accel>` | Orientation filter source (default fusion) |
+| `KP <value>` | Mahony accel gain (fusion mode); higher = faster re-level |
+| `VAR <g²>` | Motion-variance gate; higher = less lag during/after motion |
+| `EMA <alpha>` | Output smoothing 0.01–1.0; higher = less smoothing lag |
 | `HELP` | Show command list |
 
 ## Serial Output Format
@@ -238,8 +348,8 @@ business logic. Major architectural differences:
   cooperative `loop()` handles everything at well over 200 Hz polling rate.
 
 - **BLE GATT instead of HTTP + WebSocket.** No embedded web server, no
-  dashboard HTML, no mDNS. The dashboard is now a separate Web-Bluetooth
-  client.
+  served dashboard HTML, no mDNS. The dashboards (under `dashboards/`) are now
+  standalone Web-Bluetooth clients.
 
 - **No `wifi_config.h`.** SSID / credentials are gone. The device is paired
   by BLE address.
@@ -253,6 +363,15 @@ business logic. Major architectural differences:
 
 - **No `ESP.getFreeHeap()` diagnostic.** No equivalent on the MG24 / Silabs
   core that's worth exposing.
+
+- **No deep-sleep / wake-on-motion.** The sibling XIAO nRF52840 Sense port has
+  a deep-sleep framework that powers the board down after inactivity and wakes
+  it on an LSM6DS3 motion interrupt. On the XIAO MG24 Sense the IMU's INT line
+  is **not** routed to a wake-capable GPIO, so wake-on-motion is impossible and
+  the sleep framework is deliberately omitted from this build. Everything else
+  carried over from the nRF52840 firmware — the testing dashboard, the tilt
+  game, and tuning persistence (`SAVE`) — is present here. (Gyro bias is
+  recalibrated automatically at boot rather than on demand.)
 
 - **Arduino IDE flat sketch layout.** All `.cpp` / `.h` files live next to
   the `.ino` in the project root (instead of `src/` and `include/` as on the

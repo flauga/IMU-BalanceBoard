@@ -22,7 +22,11 @@ static constexpr uint32_t IMU_INIT_RETRY_DELAY_MS = 500;
 // default and reliable everywhere. The per-frame text print is rate-divided
 // so this is still well within budget.
 static constexpr uint32_t SERIAL_BAUD_RATE         = 115200;
-static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 20;   // 50 Hz output rate
+// Output cadence for BLE notifies (and the rate-divided serial print). Raised
+// from 20 ms (50 Hz) to 11 ms (~90 Hz): smaller, more frequent notifies mean the
+// OS BLE stack batches fewer frames per burst, so the browser sees fresher data
+// and the dot stutters less. The browser does render-side smoothing on top.
+static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 11;   // ~90 Hz output rate
 
 // --- BLE ---
 // 16-byte custom UUIDs for the IMU service and its two characteristics.
@@ -32,11 +36,37 @@ static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 20;   // 50 Hz output rate
 #define BLE_IMU_ANGLES_CHAR_UUID  "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  // notify
 #define BLE_IMU_COMMAND_CHAR_UUID "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  // write (text cmds)
 
+// --- BLE connection parameters (requested on connect) ---
+// THE batching fix. The board fires a notify every SERIAL_PRINT_INTERVAL_MS, but
+// the radio only transmits during a *connection event* — one per *connection
+// interval*. If we never ask, the central (Windows/Chrome) defaults to ~30-50 ms,
+// so several notifies queue between events and arrive at the browser in one burst
+// → the "freeze then snap" dot. On connect we *request* a fast 15 ms interval
+// (sl_bt_connection_set_parameters), then retune the output cadence to whatever
+// the central actually grants so exactly one fresh frame lands per event.
+//
+// All values are integers (uint16_t) — deliberately no floats: this is requested
+// from the BLE-host task, whose small stack the float-printf path overflows.
+//   interval: units 1.25 ms (12 => 15 ms; floor 6 => 7.5 ms, but Windows clamps higher)
+//   latency : intervals the peripheral may skip — MUST be 0, we always have data
+//   timeout : units 10 ms; rule: timeout_ms > (1 + latency) * max_interval_ms * 2
+//   ce_len  : connection-event length, units 0.625 ms; 0 = let the stack decide
+static constexpr uint16_t BLE_CONN_INTERVAL_MIN = 12;   // 15 ms
+static constexpr uint16_t BLE_CONN_INTERVAL_MAX = 12;   // 15 ms (pinned, no band)
+static constexpr uint16_t BLE_CONN_LATENCY      = 0;    // never skip an event
+static constexpr uint16_t BLE_CONN_TIMEOUT      = 100;  // x10 ms = 1000 ms supervision
+static constexpr uint16_t BLE_CONN_CE_MIN       = 0;    // don't care
+static constexpr uint16_t BLE_CONN_CE_MAX       = 0;    // don't care
+
 // --- Mahony Filter ---
 // Kp = proportional gain (higher = accel corrects gyro faster, more responsive but noisier)
 // Ki = integral gain (corrects slow gyro bias drift)
 // Tune Kp down if output is jittery; tune Kp up if it's too sluggish.
-static constexpr float MAHONY_KP               = 0.5f;
+//
+// MAHONY_KP and MAHONY_VAR_THRESHOLD are the *boot defaults*; the live values are
+// runtime-tunable (see MahonyFilter::setKp / setVarThreshold and the KP/VAR BLE
+// commands) and may be persisted to NVM. The others are fixed.
+static constexpr float MAHONY_KP               = 1.2f;
 static constexpr float MAHONY_KI               = 0.00005f;
 // Clamp on integral bias estimate (rad/s) so a runaway can never exceed
 // real gyro bias. Per-unit offsets are <10°/s; we calibrate them at boot.
@@ -45,3 +75,11 @@ static constexpr float MAHONY_ACCEL_GATE       = 4.0f;   // magnitude gate sharp
 // Variance gate: reject accel during dynamic motion (high variance = moving)
 static constexpr uint8_t  MAHONY_VAR_WINDOW    = 32;     // samples (~154 ms at 208 Hz)
 static constexpr float    MAHONY_VAR_THRESHOLD = 0.002f; // g² — above this = dynamic motion
+
+// --- Default smoothing / filter source (runtime-tunable) ---
+// EMA output smoothing alpha (higher = less smoothing, more responsive).
+// Raised 0.5 → 0.6: with the browser now doing render-side smoothing, we let the
+// firmware pass a fresher (lower-lag) signal and keep the visual smoothing client-side.
+static constexpr float    EMA_ALPHA_DEFAULT    = 0.6f;
+// Filter source modes — what feeds the streamed Euler angles.
+enum class FilterMode : uint8_t { Fusion = 0, Gyro = 1, Accel = 2 };

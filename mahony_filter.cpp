@@ -20,10 +20,10 @@ float MahonyFilter::computeKpEff(float norm_g) const {
         float mean     = var_sum_ / (float)n;
         float variance = (var_sum_sq_ / (float)n) - (mean * mean);
         if (variance < 0.0f) variance = 0.0f;
-        var_trust = fmaxf(0.0f, 1.0f - variance / MAHONY_VAR_THRESHOLD);
+        var_trust = fmaxf(0.0f, 1.0f - variance / var_thresh_);
     }
 
-    return MAHONY_KP * mag_trust * var_trust;
+    return kp_ * mag_trust * var_trust;
 }
 
 void MahonyFilter::update(float ax, float ay, float az,
@@ -60,7 +60,7 @@ void MahonyFilter::update(float ax, float ay, float az,
     float kp_eff   = computeKpEff(norm_g);
     // Trust ratio (0..1) — same gating applied to KI so the integral term
     // doesn't accumulate spurious bias during motion or accel anomalies.
-    float trust    = (MAHONY_KP > 0.0f) ? (kp_eff / MAHONY_KP) : 0.0f;
+    float trust    = (kp_ > 0.0f) ? (kp_eff / kp_) : 0.0f;
     last_trust_    = trust;
     float inv_norm = 1.0f / norm;
     ax *= inv_norm; ay *= inv_norm; az *= inv_norm;

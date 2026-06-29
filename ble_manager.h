@@ -54,6 +54,13 @@ private:
     uint16_t    _imuSvc                = 0;
     uint16_t    _anglesChar            = 0;
     uint16_t    _cmdChar               = 0;
+    uint16_t    _boardIdChar           = 0;
+
+    // Stable per-board identity string (e.g. "MG24-AABBCCDDEEFF"), derived from
+    // the radio's own Bluetooth address at boot. Read-only over BLE so a client
+    // can tell which physical board it's connected to (per-user score keying).
+    char        _boardId[20]           = {0};
+    uint8_t     _boardIdLen            = 0;
 
     // Diagnostics for the once-per-second [STATS] line, mirroring ESP32.
     uint32_t _txFrames    = 0;
@@ -64,4 +71,5 @@ private:
     void _initGattDb();
     void _startAdvertising();
     void _handleCommandWrite(const uint8_t* data, uint8_t len);
+    void _publishSnapshot();   // refresh the readable tuning/limit CSV snapshot
 };

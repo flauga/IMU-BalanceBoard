@@ -10,7 +10,7 @@
 
 profiles:
   xiao_mg24:
-    fqbn: SiliconLabs:silabs:xiao_mg24:protocol_stack=ble_silabs,reference_voltage=avdd
+    fqbn: SiliconLabs:silabs:xiao_mg24:protocol_stack=ble_silabs
     platforms:
       - platform: SiliconLabs:silabs (3.0.0)
         platform_index_url: https://siliconlabs.github.io/arduino/package_arduinosilabs_index.json

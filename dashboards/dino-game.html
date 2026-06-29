@@ -1,0 +1,835 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Balance Board Dino — tilt to play</title>
+<style>
+  :root{
+    --bg:#0e0f13; --panel:#191b22; --panel2:#22252e; --line:#2c3039;
+    --text:#e8eaf0; --text2:#9aa0ad; --accent:#5cc8ff; --green:#3ddc84;
+    --amber:#ffc24b; --red:#ff5d5d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{font-size:18px;margin:0;font-weight:650}
+  .sub{color:var(--text2);font-weight:400;font-size:13px}
+  .spacer{flex:1}
+  button{font:inherit;color:var(--text);background:var(--panel2);
+    border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer}
+  button:hover:not(:disabled){border-color:#3a3f4b}
+  button:disabled{opacity:.45;cursor:default}
+  .b-green{background:#16361f;border-color:#1f7a3f}
+  .b-red{background:#3a1a1a;border-color:#7a2f2f}
+  .b-amber{background:#3a311a;border-color:#7a5f1f}
+  .b-sm{padding:6px 10px;font-size:13px}
+  .seg{display:flex;gap:6px}
+  .seg button{flex:1;padding:7px 0;text-align:center}
+  .seg button.active{background:#13344a;border-color:var(--accent);color:var(--accent)}
+  .dot{width:9px;height:9px;border-radius:50%;background:#555;display:inline-block;margin-right:6px}
+  .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+  main{display:flex;gap:20px;padding:20px;flex-wrap:wrap;align-items:flex-start}
+  .stage{flex:1 1 640px;min-width:320px}
+  canvas{width:100%;height:auto;background:#f7f7f7;border-radius:12px;border:1px solid var(--line);display:block}
+  .side{flex:0 0 320px;display:flex;flex-direction:column;gap:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h2{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);
+    display:flex;justify-content:space-between;align-items:center}
+  .row{display:flex;justify-content:space-between;align-items:center;margin:8px 0}
+  .big{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums}
+  .muted{color:var(--text2)}
+  input[type=range]{width:100%}
+  /* parameter slider rows */
+  .p-row{margin:10px 0}
+  .p-row .p-head{display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px}
+  .p-row .p-val{color:var(--accent);font-variant-numeric:tabular-nums}
+  .p-row .p-hint{font-size:11px;color:var(--text2);margin-top:2px}
+  .p-group{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);
+    margin:14px 0 4px;border-top:1px solid var(--line);padding-top:10px}
+  .p-group:first-child{border-top:none;padding-top:0;margin-top:0}
+  /* tilt meter */
+  .meter{position:relative;height:26px;border-radius:13px;background:var(--panel2);
+    border:1px solid var(--line);overflow:hidden}
+  .meter .mid{position:absolute;left:50%;top:0;bottom:0;width:2px;background:#3a3f4b}
+  .meter .z-jump,.meter .z-duck{position:absolute;top:0;bottom:0;opacity:.18}
+  .meter .z-jump{background:var(--green)} .meter .z-duck{background:var(--amber)}
+  .meter .needle{position:absolute;top:-2px;bottom:-2px;width:4px;background:var(--accent);
+    border-radius:2px;transform:translateX(-2px);transition:left .03s linear}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600}
+  .pill.jump{background:#16361f;color:var(--green)}
+  .pill.duck{background:#3a311a;color:var(--amber)}
+  .pill.run{background:var(--panel2);color:var(--text2)}
+  #log{font:12px/1.5 ui-monospace,Consolas,monospace;color:var(--text2);
+    max-height:110px;overflow:auto;white-space:pre-wrap}
+  kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;
+    border-radius:5px;padding:1px 6px;font:12px ui-monospace,monospace}
+  /* hide mode: collapse everything but the canvas */
+  body.hidden-ui header,
+  body.hidden-ui .side,
+  body.hidden-ui .howto{display:none}
+  body.hidden-ui main{padding:10px}
+  body.hidden-ui .stage{flex:1 1 100%}
+  #showOptions{position:fixed;top:10px;right:10px;z-index:50;display:none}
+  body.hidden-ui #showOptions{display:inline-block}
+  .cal-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .cal-val{font-variant-numeric:tabular-nums;color:var(--accent)}
+</style>
+</head>
+<body class="hidden-ui">
+<div id="cal-warn" style="display:none;position:fixed;top:0;left:0;right:0;z-index:200;
+     padding:10px 16px;text-align:center;font:600 14px/1.4 system-ui,sans-serif;
+     background:#7c2d12;color:#fed7aa;border-bottom:1px solid #b45309;box-shadow:0 2px 10px rgba(0,0,0,.4);">
+  <span id="cal-warn-msg"></span>
+</div>
+<button id="showOptions" class="b-amber b-sm">⚙ Options</button>
+
+<header>
+  <h1>🦖 Balance Board Dino <span class="sub">— tilt to jump &amp; duck</span></h1>
+  <div class="spacer"></div>
+  <span><span id="dot" class="dot"></span><span id="connText" class="muted">disconnected</span></span>
+  <button id="btnConnect" class="b-green">Connect board</button>
+  <button id="btnDisconnect" class="b-red" disabled>Disconnect</button>
+  <button id="btnHide" class="b-amber">Hide options</button>
+</header>
+
+<main>
+  <div class="stage">
+    <canvas id="game" width="900" height="260"></canvas>
+    <div class="card howto" style="margin-top:14px">
+      <h2>How to play</h2>
+      <div class="muted">
+        Set your tilt range once in the <b>testing dashboard</b> (front/back/
+        left/right) — it's saved on the board and shared here automatically.
+        Pick a <b>Control axis</b> (pitch = fore/aft, roll = left/right); the
+        midpoint of the matching limits becomes centre and the game triggers
+        part-way to each limit — easier than holding an exact angle. Tilt toward
+        the <b style="color:var(--green)">+</b> limit to <b>jump</b> (hold for a
+        higher/longer jump), tilt the other way to <b>duck</b>. No saved limits?
+        It falls back to the ±threshold slider. No board? <kbd>↑</kbd>/<kbd>Space</kbd>
+        jump, <kbd>↓</kbd> duck, <kbd>Enter</kbd> start.
+      </div>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h2>Score</h2>
+      <div class="row"><span class="muted">Current</span><span id="score" class="big">0</span></div>
+      <div class="row"><span class="muted">High score</span><span id="hi" class="big" style="font-size:22px">0</span></div>
+      <div class="row"><span class="muted">State</span><span id="state" class="pill run">idle</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Tilt control</h2>
+      <div class="row" style="margin-bottom:6px"><span class="muted">Control axis</span></div>
+      <div class="seg" id="axisSel">
+        <button data-axis="pitch" class="active">Pitch (fore/aft)</button>
+        <button data-axis="roll">Roll (left/right)</button>
+      </div>
+
+      <div class="meter" id="meter" style="margin-top:12px">
+        <div class="z-duck"  id="zDuck"></div>
+        <div class="z-jump"  id="zJump"></div>
+        <div class="mid"></div>
+        <div class="needle"  id="needle" style="left:50%"></div>
+      </div>
+      <div class="row"><span class="muted"><span id="axisLabel">pitch</span></span><span id="pitchVal" class="muted">—</span></div>
+
+      <div class="row" style="margin-top:8px" title="Render-side easing of the control. Lower = smoother (hides BLE stutter, adds slight lag). 1.0 = off.">
+        <span class="muted" style="font-size:12px">Smoothing</span>
+        <span style="display:flex;align-items:center;gap:8px">
+          <input type="range" id="dinoSmooth" min="0.1" max="1" step="0.05" value="0.8" style="width:110px">
+          <span id="dinoSmoothVal" class="muted" style="font-size:12px;min-width:30px;text-align:right">0.80</span>
+        </span>
+      </div>
+
+      <div class="p-group">Range (from device)</div>
+      <div class="row" style="margin-top:2px">
+        <span class="muted" style="font-size:12px">
+          + limit <span id="frontVal" class="cal-val">—</span>°
+          · − limit <span id="backVal" class="cal-val">—</span>°</span>
+        <button id="btnReread" class="b-sm" disabled>Re-read</button>
+      </div>
+      <div class="p-hint">Limits are set in the <b>testing dashboard</b> and stored on
+        the board, then shared here. Trigger point is
+        <span id="trigPctVal">60</span>% of the way to a limit. With no saved
+        limits the game falls back to the ±threshold slider below.</div>
+
+      <div class="row" style="margin-top:10px">
+        <label class="muted"><input type="checkbox" id="invert" /> Invert direction</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>
+        Game settings
+        <span style="display:flex;gap:6px">
+          <button id="btnSaveDefaults" class="b-green b-sm">Save as defaults</button>
+          <button id="btnDefaults" class="b-sm">Reset</button>
+        </span>
+      </h2>
+      <div id="params"><!-- parameter sliders injected here --></div>
+      <div class="p-hint" id="saveHint" style="margin-top:8px">“Save as defaults” downloads an updated
+        <code>dino-game.html</code> with the current slider values baked in as the
+        new defaults — overwrite this file with it so it reopens with these values.</div>
+    </div>
+
+    <div class="card">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+function log(m){ const el=$('log'); if(!el) return; el.textContent += m+"\n"; el.scrollTop=el.scrollHeight; }
+
+/* ═══════════════════════════════ TUNABLES ═══════════════════════════════════
+   DEFAULTS holds the baseline. Every entry tagged in PARAMS below becomes a live
+   slider in the "Game settings" panel, writing straight back into CONFIG. The
+   game reads CONFIG.* every frame, so changes take effect immediately (speed /
+   spacing apply on the next run; physics apply live).                          */
+const DEFAULTS = {
+  // speed
+  startSpeed:    3.0,   speedRamp:     2.0,   rampOverFrames:4000,
+  // jump physics
+  gravity:       0.52,  jumpVelocity:  13.5,  jumpHoldFrames:14,  jumpHoldAccel: 0.32,
+  // obstacles
+  spawnGapBase:  150,   spawnGapRand:  70,    obstacleMinGapPx: 360,
+  birdChance:    0.38,  birdMinSpeed:  6.5,   bigCactusChance: 0.25,
+  cactusScale:   1.05,  birdScale:     1.0,
+  // input feel
+  tiltThreshold: 10,    tiltRelease:   0.45,  triggerFrac: 0.50,
+  // scoring
+  scorePerFrame: 0.025,
+  // fixed (not exposed)
+  meterSpanDeg:  40, dinoW:44, dinoH:48, dinoX:70,
+  axisDefault:'pitch', invertDefault:false,
+};
+const CONFIG = Object.assign({}, DEFAULTS);
+
+/* Parameter slider definitions: [key, label, min, max, step, hint, decimals].
+   `jumpVelocity` is stored positive here and negated where used.               */
+const PARAMS = [
+  ['__g_speed', 'SPEED'],
+  ['startSpeed',     'Start speed',        1,   10,  0.5, 'Lower = slower / easier', 1],
+  ['speedRamp',      'Speed ramp',         0,   6,   0.5, 'Extra speed gained over a run', 1],
+  ['rampOverFrames', 'Ramp slowness',      1000,8000,500, 'Higher = speed ramps up more slowly', 0],
+
+  ['__g_jump', 'JUMP FEEL'],
+  ['gravity',        'Gravity',            0.3, 1.2, 0.02,'Lower = floatier, longer hang time', 2],
+  ['jumpVelocity',   'Jump power',         8,   20,  0.5, 'Higher = jumps higher', 1],
+  ['jumpHoldFrames', 'Hold boost frames',  0,   30,  1,   'How long holding extends the jump', 0],
+  ['jumpHoldAccel',  'Hold boost force',   0,   0.8, 0.02,'Upward assist while holding jump', 2],
+
+  ['__g_obs', 'OBSTACLES'],
+  ['spawnGapBase',   'Spawn gap',          60,  260, 5,   'Higher = more time between obstacles', 0],
+  ['spawnGapRand',   'Spawn randomness',   0,   150, 5,   'Extra random gap variation', 0],
+  ['obstacleMinGapPx','Min gap (px)',      150, 600, 10,  'Hard floor on spacing — higher = easier', 0],
+  ['birdChance',     'Bird frequency',     0,   0.6, 0.02,'Fraction of obstacles that are duck-birds', 2],
+  ['birdMinSpeed',   'Bird start speed',   3,   10,  0.5, 'Birds only appear past this speed', 1],
+  ['bigCactusChance','Tall-cactus chance', 0,   1,   0.05,'Fraction of cacti that are the tall kind', 2],
+  ['cactusScale',    'Cactus size',        0.6, 1.6, 0.05,'Scales cactus height/width', 2],
+  ['birdScale',      'Bird size',          0.6, 1.6, 0.05,'Scales bird size', 2],
+
+  ['__g_input', 'INPUT FEEL'],
+  ['tiltThreshold',  'Tilt threshold (°)', 3,   30,  1,   'Degrees of tilt to trigger (no calibration)', 0],
+  ['triggerFrac',    'Trigger fraction',   0.3, 0.9, 0.05,'With calibration: % toward a limit to fire', 2],
+  ['tiltRelease',    'Release hysteresis', 0.2, 0.9, 0.05,'Lower = must return further to reset', 2],
+
+  ['__g_score', 'SCORING'],
+  ['scorePerFrame',  'Score rate',         0.005,0.08,0.005,'Points per frame × speed', 3],
+];
+
+/* ───────────────────────────── BLE (same service as the board) ───────────── */
+const SVC_UUID    = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const ANGLES_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const CMD_UUID    = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";  // readable tuning/limit snapshot
+
+let device=null, anglesChar=null, cmdChar=null, connected=false;
+let rawRoll=0, rawPitch=0;       // latest raw angles (deg)
+let axis = CONFIG.axisDefault;   // 'pitch' or 'roll'
+let invert = CONFIG.invertDefault;
+
+/* Two-point calibration per axis, READ FROM THE DEVICE on connect (set in the
+   testing dashboard, stored in the board's NVM, shared with every game). For
+   pitch the limits are front/back; for roll they are right/left. When both
+   limits of an axis are present we derive centre + per-direction trigger angles;
+   otherwise we fall back to centre=0 and the symmetric tiltThreshold slider. */
+const calib = {
+  pitch:{ front:null, back:null },
+  roll: { front:null, back:null },
+};
+let tilt = 0;   // axis value relative to the calibrated/zero centre (deg), RAW
+// Render-side smoothing. onAngles() has no frame queue — it fires per BLE
+// notification, which arrive in bursts (several at once, then a gap). `tiltDisp`
+// eases toward the raw `tilt` once per rAF frame so the needle + jump/duck
+// response glide instead of freezing then snapping when a burst lands.
+// DINO_SMOOTH: per-frame easing toward raw; 1 = off, lower = smoother/laggier.
+let tiltDisp = 0;
+// Default raised 0.4 → 0.8 (key bumped v1→v2 so the new default reaches users who
+// saved the old value): the BLE burst this easing hid is now fixed at source by the
+// 15 ms connection interval. Since the jump/duck INTENT reads tiltDisp, heavy easing
+// was delaying gameplay itself (~33 ms at 0.4 vs ~10 ms at 0.8). Slider stays live.
+let DINO_SMOOTH = (() => { const v = parseFloat(localStorage.getItem('dino_smooth_v2')); return (v>=0.05 && v<=1) ? v : 0.8; })();
+
+function activeCal(){ return calib[axis]; }
+function rawAxis(){ return axis==='roll' ? rawRoll : rawPitch; }
+
+// Centre of the active axis: midpoint of front/back if both set, else 0.
+function axisCentre(){
+  const c=activeCal();
+  if(c.front!==null && c.back!==null) return (c.front+c.back)/2;
+  return 0;
+}
+// Returns {jump, duck} trigger thresholds (deg from centre, signed by `invert`).
+// With calibration, each is triggerFrac of the way from centre to that limit.
+// Without, both are the symmetric tiltThreshold.
+function triggers(){
+  const c=activeCal();
+  if(c.front!==null && c.back!==null){
+    const ctr=axisCentre();
+    const fr=Math.abs(c.front-ctr)*CONFIG.triggerFrac;
+    const bk=Math.abs(c.back -ctr)*CONFIG.triggerFrac;
+    // "front" tilt should JUMP. front may be > or < centre; we map by sign below.
+    return { frontSign: Math.sign(c.front-ctr)||1, jump:fr, duck:bk };
+  }
+  return { frontSign:1, jump:CONFIG.tiltThreshold, duck:CONFIG.tiltThreshold };
+}
+
+function setConnected(on){
+  connected=on;
+  if(!on && typeof setCalHealth==='function') setCalHealth(0);   // clear warning on drop
+  $('dot').className = on ? 'dot on' : 'dot';
+  $('connText').textContent = on ? 'connected' : 'disconnected';
+  $('btnConnect').disabled = on;
+  $('btnDisconnect').disabled = !on;
+  $('btnReread').disabled = !on;
+}
+
+if(!navigator.bluetooth){
+  log('Web Bluetooth not available — open this file in Chrome or Edge.');
+  log('Keyboard play still works: ↑/Space = jump, ↓ = duck, Enter = start.');
+  $('btnConnect').disabled = true;
+}
+
+$('btnConnect').addEventListener('click', async ()=>{
+  try{
+    log('Requesting device…');
+    device = await navigator.bluetooth.requestDevice({
+      filters:[{services:[SVC_UUID]}], optionalServices:[SVC_UUID]
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    log('Connecting…');
+    const server = await device.gatt.connect();
+    const svc    = await server.getPrimaryService(SVC_UUID);
+    anglesChar   = await svc.getCharacteristic(ANGLES_UUID);
+    try { cmdChar = await svc.getCharacteristic(CMD_UUID); } catch(_) { cmdChar=null; }
+    await anglesChar.startNotifications();
+    anglesChar.addEventListener('characteristicvaluechanged', onAngles);
+    setConnected(true);
+    await readLimitsFromDevice();
+  }catch(e){ log('Connect failed: '+e.message); }
+});
+
+/* Read the board's tilt-range limits (set in the testing dashboard, stored in
+   NVM) and map them onto this game's calibration. Snapshot format:
+   "TUNE,mode,kp,var,ema,front,back,left,right,mask". */
+async function readLimitsFromDevice(){
+  if(!cmdChar){ log('No command characteristic — using default ±threshold.'); return; }
+  try{
+    const dv = await cmdChar.readValue();
+    const p  = new TextDecoder().decode(dv).split(',');
+    if(p[0]!=='TUNE' || p.length<10) throw new Error('bad snapshot');
+    const front=+p[5], back=+p[6], left=+p[7], right=+p[8], mask=(+p[9])|0;
+    calib.pitch.front = (mask&1) ? front : null;
+    calib.pitch.back  = (mask&2) ? back  : null;
+    // Roll axis: "front" = jump-direction limit. Map right→front, left→back so
+    // tilting right jumps (and Invert flips it if the user prefers left).
+    calib.roll.front  = (mask&8) ? right : null;
+    calib.roll.back   = (mask&4) ? left  : null;
+    refreshCal();
+    setCalHealth(p.length>10 ? (+p[10]|0) : 0);   // trailing health field (older fw omits it)
+    const n=[1,2,4,8].filter(b=>mask&b).length;
+    log(`Read ${n}/4 limits from board (front ${front.toFixed(0)} back ${back.toFixed(0)} left ${left.toFixed(0)} right ${right.toFixed(0)}).`);
+    log(n? 'Using device calibration. Tilt to play!' : 'No limits saved on board — set them in the testing dashboard, or use the ±threshold slider.');
+  }catch(e){ log('Limit read failed ('+e.message+') — using ±threshold slider.'); }
+}
+
+// ── Calibration-health banner — shown only when the board needs recalibration.
+// (Banner only; the detailed engineering log lives in the testing dashboard.)
+function setCalHealth(code){
+  const el=$('cal-warn'); if(!el) return;
+  if(code===1){
+    $('cal-warn-msg').textContent='⚠ Sensor drift detected — re-zero the board in the testing dashboard.';
+    el.style.display='block';
+  } else {
+    el.style.display='none';
+  }
+}
+setInterval(async ()=>{
+  if(!connected || !cmdChar) return;
+  try{ const p=new TextDecoder().decode(await cmdChar.readValue()).split(',');
+    if(p[0]==='TUNE' && p.length>10) setCalHealth(+p[10]|0); }catch{}
+}, 5000);
+$('btnDisconnect').addEventListener('click', ()=>{
+  if(device && device.gatt.connected) device.gatt.disconnect();
+});
+function onDisconnected(){ setConnected(false); log('Board disconnected.'); }
+
+function onAngles(evt){
+  const dv = evt.target.value;          // u32 ms, f32 roll, f32 pitch, f32 yaw
+  rawRoll  = dv.getFloat32(4, true);
+  rawPitch = dv.getFloat32(8, true);
+  tilt = rawAxis() - axisCentre();
+}
+
+/* ── device-provided calibration display ── */
+function fmtCal(v){ return v===null ? '—' : v.toFixed(0); }
+function refreshCal(){
+  const c=activeCal();
+  $('frontVal').textContent = fmtCal(c.front);
+  $('backVal').textContent  = fmtCal(c.back);
+  $('trigPctVal').textContent = Math.round(CONFIG.triggerFrac*100);
+}
+$('btnReread').addEventListener('click', readLimitsFromDevice);
+
+/* ── axis selector ── */
+function setAxis(a){
+  axis = (a==='roll') ? 'roll' : 'pitch';
+  tilt = rawAxis() - axisCentre();
+  tiltDisp = tilt;                     // snap (don't glide) across an axis switch
+  document.querySelectorAll('#axisSel button').forEach(b=>{
+    b.classList.toggle('active', b.dataset.axis===axis);
+  });
+  $('axisLabel').textContent = axis;
+  refreshCal();
+}
+document.querySelectorAll('#axisSel button').forEach(b=>{
+  b.addEventListener('click', ()=>setAxis(b.dataset.axis));
+});
+$('invert').checked = CONFIG.invertDefault;
+$('invert').addEventListener('change', e=>{ invert=e.target.checked; });
+
+/* ── pointer smoothing (render-side easing) ── */
+if($('dinoSmooth')){
+  const sl=$('dinoSmooth'), lab=$('dinoSmoothVal');
+  sl.value = DINO_SMOOTH;
+  if(lab) lab.textContent = DINO_SMOOTH>=0.99 ? 'off' : DINO_SMOOTH.toFixed(2);
+  sl.addEventListener('input', ()=>{
+    DINO_SMOOTH = Number(sl.value);
+    if(lab) lab.textContent = DINO_SMOOTH>=0.99 ? 'off' : DINO_SMOOTH.toFixed(2);
+  });
+  sl.addEventListener('change', ()=>{ try{ localStorage.setItem('dino_smooth_v2', String(DINO_SMOOTH)); }catch{} });
+}
+
+/* ── parameter panel (auto-built from PARAMS) ── */
+function buildParams(){
+  const host=$('params');
+  host.innerHTML='';
+  for(const def of PARAMS){
+    if(def[0].startsWith('__g_')){
+      const g=document.createElement('div'); g.className='p-group'; g.textContent=def[1];
+      host.appendChild(g); continue;
+    }
+    const [key,label,min,max,step,hint,dec]=def;
+    const wrap=document.createElement('div'); wrap.className='p-row';
+    wrap.innerHTML =
+      `<div class="p-head"><span>${label}</span><span class="p-val" id="pv-${key}"></span></div>`+
+      `<input type="range" id="ps-${key}" min="${min}" max="${max}" step="${step}">`+
+      `<div class="p-hint">${hint}</div>`;
+    host.appendChild(wrap);
+    const slider=wrap.querySelector('#ps-'+key);
+    const valEl =wrap.querySelector('#pv-'+key);
+    const show=()=>{ valEl.textContent=Number(CONFIG[key]).toFixed(dec); };
+    slider.value=CONFIG[key]; show();
+    slider.addEventListener('input', ()=>{
+      CONFIG[key]=+slider.value; show();
+      if(key==='triggerFrac') refreshCal();
+    });
+  }
+}
+function syncParamSliders(){
+  for(const def of PARAMS){
+    if(def[0].startsWith('__g_')) continue;
+    const key=def[0], dec=def[6];
+    const s=$('ps-'+key), v=$('pv-'+key);
+    if(s){ s.value=CONFIG[key]; v.textContent=Number(CONFIG[key]).toFixed(dec); }
+  }
+}
+$('btnDefaults').addEventListener('click', ()=>{
+  Object.assign(CONFIG, DEFAULTS);
+  syncParamSliders(); refreshCal();
+  log('Game settings reset to defaults.');
+});
+
+/* ── Save current settings AS the file's defaults ──────────────────────────
+   A page can't overwrite its own file on disk (browser sandbox), so we build an
+   updated copy of this HTML with a fresh DEFAULTS block reflecting the current
+   slider values and download it. The user saves it over dino-game.html, after
+   which the file reopens with these values baked in. We serialise a new DEFAULTS
+   object literal (preserving every key, including the fixed non-slider ones) and
+   regex-replace the existing `const DEFAULTS = { … };` block in the source. */
+function serialiseDefaults(){
+  const merged = Object.assign({}, DEFAULTS, CONFIG);  // current live values win
+  const numKeys = new Set(PARAMS.filter(d=>!d[0].startsWith('__g_')).map(d=>d[0]));
+  const lines = [];
+  for(const k of Object.keys(DEFAULTS)){
+    let v = merged[k];
+    if(typeof v === 'string')      v = `'${v}'`;
+    else if(typeof v === 'boolean') v = v ? 'true':'false';
+    else if(numKeys.has(k))         v = +(+v).toPrecision(6);  // trim float noise
+    lines.push(`  ${k}: ${v},`);
+  }
+  return 'const DEFAULTS = {\n' + lines.join('\n') + '\n};';
+}
+$('btnSaveDefaults').addEventListener('click', ()=>{
+  try{
+    const src = '<!doctype html>\n' + document.documentElement.outerHTML;
+    const re  = /const DEFAULTS = \{[\s\S]*?\n\};/;
+    if(!re.test(src)){ log('Could not locate DEFAULTS block to rewrite.'); return; }
+    const out = src.replace(re, serialiseDefaults());
+    const blob = new Blob([out], {type:'text/html'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'dino-game.html';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    log('Saved dino-game.html with current settings as defaults — overwrite the original file.');
+  }catch(e){ log('Save failed: '+e.message); }
+});
+
+buildParams();
+refreshCal();
+
+/* ── tilt → intent (hysteresis), supports asymmetric jump/duck triggers ── */
+let tiltIntent='run';
+function updateTiltIntent(){
+  const t=triggers();
+  // Signed tilt where +ve means "toward the front/jump limit". Uses the smoothed
+  // tiltDisp so a BLE burst doesn't snap the intent across a threshold.
+  let p = tiltDisp * t.frontSign;
+  if(invert) p = -p;
+  const jOn=t.jump, jOff=t.jump*CONFIG.tiltRelease;
+  const dOn=t.duck, dOff=t.duck*CONFIG.tiltRelease;
+  if(tiltIntent==='run'){
+    if(p >  jOn) tiltIntent='jump';
+    else if(p < -dOn) tiltIntent='duck';
+  }else if(tiltIntent==='jump'){
+    if(p <  jOff) tiltIntent='run';
+  }else if(tiltIntent==='duck'){
+    if(p > -dOff) tiltIntent='run';
+  }
+  return tiltIntent;
+}
+
+/* ───────────────────────────── tilt meter ───────────────────────────────── */
+function renderMeter(){
+  const span = CONFIG.meterSpanDeg;
+  const clamp = v => Math.max(-span, Math.min(span, v));
+  const t=triggers();
+  let p = tiltDisp * t.frontSign; if(invert) p=-p;
+  const pct = (clamp(p)+span)/(2*span)*100;
+  $('needle').style.left = pct+'%';
+  const jPct=t.jump/span*50, dPct=t.duck/span*50;
+  $('zJump').style.left=(50+jPct)+'%'; $('zJump').style.right='0'; $('zJump').style.width='auto';
+  $('zDuck').style.left='0'; $('zDuck').style.width=(50-dPct)+'%';
+  $('pitchVal').textContent = connected ? p.toFixed(1)+'°' : '—';
+  const st=$('state');
+  if(game.running||game.over) return; // leave game state text alone mid-run
+  st.textContent = tiltIntent;
+  st.className = 'pill '+(tiltIntent==='jump'?'jump':tiltIntent==='duck'?'duck':'run');
+}
+
+/* ───────────────────────────── Dino game ──────────────────────────────────
+   Self-contained endless runner; procedural canvas (offline / file://).      */
+const cv = $('game'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const GROUND = H - 48;             // feet + obstacle bottoms rest here
+const DUCK_H = 26;
+
+const game = {
+  running:false, over:false,
+  t:0, speed:CONFIG.startSpeed, score:0, hi:+(localStorage.getItem('dinoHi')||0),
+  dino:{ x:CONFIG.dinoX, y:GROUND-CONFIG.dinoH, vy:0, ducking:false,
+         w:CONFIG.dinoW, h:CONFIG.dinoH, holding:false, holdLeft:0 },
+  obstacles:[], spawnTimer:0, legPhase:0,
+};
+$('hi').textContent = game.hi;
+
+function dinoGroundedTop(){ return GROUND - (game.dino.ducking?DUCK_H:game.dino.h); }
+function isGrounded(){ return game.dino.y >= dinoGroundedTop()-0.5; }
+
+function reset(){
+  game.running=true; game.over=false; game.t=0; game.speed=CONFIG.startSpeed; game.score=0;
+  game.dino.ducking=false; game.dino.holding=false; game.dino.holdLeft=0;
+  game.dino.y=GROUND-game.dino.h; game.dino.vy=0;
+  game.obstacles=[]; game.spawnTimer=30;
+  $('state').textContent='running'; $('state').className='pill run';
+}
+
+function jumpStart(){
+  if(game.over || !game.running){ reset(); return; }
+  if(isGrounded()){
+    game.dino.vy = -CONFIG.jumpVelocity;     // stored positive in CONFIG
+    game.dino.ducking = false;
+    game.dino.holding = true;
+    game.dino.holdLeft = CONFIG.jumpHoldFrames;
+  }
+}
+function jumpEnd(){ game.dino.holding=false; }
+function setDuck(on){ if(game.running) game.dino.ducking = on && isGrounded(); }
+
+function lastObstacleX(){ let mx=-Infinity; for(const o of game.obstacles) if(o.x>mx) mx=o.x; return mx; }
+
+function spawn(){
+  if(lastObstacleX() > W - CONFIG.obstacleMinGapPx) return;
+  const r=Math.random();
+  if(game.speed>=CONFIG.birdMinSpeed && r<CONFIG.birdChance){
+    const bw=34*CONFIG.birdScale, bh=24*CONFIG.birdScale;
+    const bottom=GROUND-22;
+    game.obstacles.push({type:'bird', x:W+20, y:bottom-bh, w:bw, h:bh, wing:0});
+  }else{
+    const big=Math.random()<CONFIG.bigCactusChance;
+    const w=(big?30:20)*CONFIG.cactusScale, h=(big?46:32)*CONFIG.cactusScale;
+    game.obstacles.push({type:'cactus', x:W+20, y:GROUND-h, w, h});
+  }
+}
+
+function rectHit(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
+
+function update(){
+  if(!game.running||game.over) return;
+  game.t++;
+  game.speed = CONFIG.startSpeed + CONFIG.speedRamp*Math.min(1, game.t/CONFIG.rampOverFrames);
+  const d=game.dino;
+  if(d.holding && d.holdLeft>0 && d.vy<0){ d.vy -= CONFIG.jumpHoldAccel; d.holdLeft--; }
+  else d.holding=false;
+  d.vy += CONFIG.gravity; d.y += d.vy;
+  const floorTop = GROUND - (d.ducking?DUCK_H:d.h);
+  if(d.y>floorTop){ d.y=floorTop; d.vy=0; }
+  if(--game.spawnTimer<=0){
+    spawn();
+    game.spawnTimer = Math.max(45, CONFIG.spawnGapBase - game.speed*5) + Math.random()*CONFIG.spawnGapRand;
+  }
+  const db=dinoBoxSafe();
+  for(const o of game.obstacles){
+    o.x -= game.speed;
+    if(o.type==='bird') o.wing=(o.wing+0.3)%2;
+    if(rectHit(db,o)) endGame();
+  }
+  game.obstacles = game.obstacles.filter(o=>o.x+o.w>-10);
+  game.score += CONFIG.scorePerFrame*game.speed;
+  $('score').textContent = Math.floor(game.score);
+}
+
+function dinoBoxSafe(){
+  const d=game.dino;
+  if(d.ducking) return {x:d.x+4, y:GROUND-DUCK_H+2, w:d.w+8, h:DUCK_H-4};
+  return {x:d.x+8, y:d.y+4, w:d.w-16, h:d.h-6};
+}
+
+function endGame(){
+  game.over=true; game.running=false;
+  if(Math.floor(game.score)>game.hi){
+    game.hi=Math.floor(game.score); localStorage.setItem('dinoHi',game.hi);
+    $('hi').textContent=game.hi;
+  }
+  $('state').textContent='crashed'; $('state').className='pill duck';
+}
+
+/* ───────────────────────────── rendering ────────────────────────────────── */
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle='#535353'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,GROUND); ctx.lineTo(W,GROUND); ctx.stroke();
+  ctx.fillStyle='#bdbdbd';
+  const off=(game.t*game.speed)%40;
+  for(let x=-off; x<W; x+=40) ctx.fillRect(x, GROUND+8, 14, 3);
+  drawDino();
+  for(const o of game.obstacles) (o.type==='bird'?drawBird:drawCactus)(o);
+  if(!game.running && !game.over) banner('Press Enter or tilt/▲ to start');
+  else if(game.over)             banner('💥 Crashed — Enter / tilt / ▲ to retry');
+}
+// Chrome-style T-rex, drawn as a pixel grid of filled cells so the silhouette
+// reads like the offline game's dino rather than a plain box. Two poses: a
+// standing run (alternating legs) and a long crouched duck. A small unit `u`
+// scales the grid to the dino's configured box, so size tweaks still work.
+const DINO_COLOR = '#535353', DINO_EYE = '#f7f7f7';
+
+/* ── Chrome T-rex sprite, traced as pixel grids ──────────────────────────────
+   The offline dino is instantly recognisable by its silhouette: a big squarish
+   head with a forward jaw and a single white eye-notch, a stubby arm, a thick
+   curved tail, a deep chest, and two chunky legs. Rather than approximate that
+   with a handful of rectangles, we trace the actual sprite cell-by-cell as
+   strings — '#' = body, 'o' = the white eye gap, ' ' = empty. The standing grid
+   is 22 wide × 24 tall; the two run frames differ only in the feet. The whole
+   grid is scaled by a unit `u` into the dino's configured box, so the size
+   sliders still work. Drawing per-cell keeps the unmistakable blocky look.    */
+const DINO_RUN_A = [
+  "                #########",
+  "                #ooo#####",
+  "                #o#######",
+  "                #########",
+  "                ######## ",
+  "                ######   ",
+  "                ######   ",
+  "#               ######   ",
+  "##              ######   ",
+  "###      ##############  ",
+  "####    ###############  ",
+  "#####  ################  ",
+  "######################## ",
+  "#######################  ",
+  "######################   ",
+  "#####################    ",
+  "###### ##############     ",
+  "###### #############      ",
+  "###### ####  ######       ",
+  "#####  ###   ######       ",
+  "       ##    ###  #       ",
+  "       ##    ###          ",
+  "       ##    ###          ",
+  "      ###    ###          ",
+];
+// Run frame B differs only in the feet (legs swap planted/lifted).
+const DINO_RUN_B = [
+  "                #########",
+  "                #ooo#####",
+  "                #o#######",
+  "                #########",
+  "                ######## ",
+  "                ######   ",
+  "                ######   ",
+  "#               ######   ",
+  "##              ######   ",
+  "###      ##############  ",
+  "####    ###############  ",
+  "#####  ################  ",
+  "######################## ",
+  "#######################  ",
+  "######################   ",
+  "#####################    ",
+  "###### ##############     ",
+  "###### #############      ",
+  "###### ####  ######       ",
+  "#####  ###   ###          ",
+  "       ##    ###          ",
+  "      ###    ##  #        ",
+  "      ###     ##          ",
+  "     ###       ##         ",
+];
+const DINO_DUCK = [
+  "                              #########",
+  "                              #ooo#####",
+  "                              #o#######",
+  "                              #########",
+  "#                             ######## ",
+  "#####                         ######   ",
+  "####################################   ",
+  "#####################################  ",
+  "####################################   ",
+  "###################################    ",
+  "###### ####    #### ###########        ",
+  "###### ###     ###  ##                 ",
+  "       ##      ##                      ",
+];
+
+function blitGrid(grid, u, ox, oy){
+  for(let r=0; r<grid.length; r++){
+    const row=grid[r];
+    for(let c=0; c<row.length; c++){
+      const ch=row[c];
+      if(ch==='#'){ ctx.fillStyle=DINO_COLOR; ctx.fillRect(ox+c*u, oy+r*u, u+0.5, u+0.5); }
+      else if(ch==='o'){ ctx.fillStyle=DINO_EYE; ctx.fillRect(ox+c*u, oy+r*u, u+0.5, u+0.5); }
+    }
+  }
+}
+
+function drawDino(){
+  const d=game.dino;
+
+  if(d.ducking){
+    // Long crouched pose — wide and low, head still up front with the eye.
+    const cols=DINO_DUCK[0].length, rows=DINO_DUCK.length;
+    const u=DUCK_H/rows;
+    const ox=d.x-4, oy=GROUND-DUCK_H;
+    blitGrid(DINO_DUCK, u, ox, oy);
+    return;
+  }
+
+  // Standing / running. Pick the run frame from legPhase while grounded; in the
+  // air hold frame A (legs together reads as a jump).
+  let grid=DINO_RUN_A;
+  if(isGrounded()){
+    game.legPhase=(game.legPhase+0.18)%2;
+    grid = game.legPhase<1 ? DINO_RUN_A : DINO_RUN_B;
+  }
+  const rows=grid.length;          // 24
+  const u=d.h/rows;
+  const ox=d.x-2, oy=d.y;
+  blitGrid(grid, u, ox, oy);
+}
+function drawCactus(o){
+  ctx.fillStyle='#2e7d32';
+  ctx.fillRect(o.x, o.y, o.w, o.h);
+  ctx.fillRect(o.x-6, o.y+o.h*0.4, 6, o.h*0.3);
+  ctx.fillRect(o.x+o.w, o.y+o.h*0.25, 6, o.h*0.3);
+}
+function drawBird(o){
+  ctx.fillStyle='#444';
+  const up=o.wing<1;
+  ctx.fillRect(o.x, o.y+o.h*0.33, o.w, o.h*0.25);
+  if(up) ctx.fillRect(o.x+o.w*0.25, o.y, o.w*0.5, o.h*0.33);
+  else   ctx.fillRect(o.x+o.w*0.25, o.y+o.h*0.58, o.w*0.5, o.h*0.33);
+  ctx.fillRect(o.x+o.w-4, o.y+o.h*0.25, 8, 5);
+}
+function banner(txt){
+  ctx.fillStyle='#535353'; ctx.font='600 22px system-ui,Segoe UI,Arial';
+  ctx.textAlign='center'; ctx.fillText(txt, W/2, H/2-10); ctx.textAlign='left';
+}
+
+/* ───────────────────────────── main loop ────────────────────────────────── */
+let prevIntent='run';
+function tick(){
+  // Ease the displayed tilt toward the latest raw reading once per frame. This
+  // smooths BLE burst/batching into a glide; the needle + jump/duck triggers all
+  // read tiltDisp. At DINO_SMOOTH=1 it's identity (raw).
+  tiltDisp += (tilt - tiltDisp) * DINO_SMOOTH;
+  if(connected){
+    const intent=updateTiltIntent();
+    if(intent==='jump' && prevIntent!=='jump') jumpStart();
+    else if(intent!=='jump' && prevIntent==='jump') jumpEnd();
+    setDuck(intent==='duck');
+    prevIntent=intent;
+  }
+  update(); draw(); renderMeter();
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+/* ───────────────────────────── keyboard fallback ────────────────────────── */
+let upHeld=false;
+addEventListener('keydown', e=>{
+  if(e.code==='ArrowUp'||e.code==='Space'){ e.preventDefault(); if(!upHeld){ upHeld=true; jumpStart(); } }
+  else if(e.code==='ArrowDown'){ e.preventDefault(); setDuck(true); }
+  else if(e.code==='Enter'){ if(!game.running||game.over) reset(); }
+});
+addEventListener('keyup', e=>{
+  if(e.code==='ArrowUp'||e.code==='Space'){ upHeld=false; jumpEnd(); }
+  else if(e.code==='ArrowDown') setDuck(false);
+});
+
+/* ───────────────────────────── hide / show options ──────────────────────── */
+$('btnHide').addEventListener('click', ()=>{ document.body.classList.add('hidden-ui'); });
+$('showOptions').addEventListener('click', ()=>{ document.body.classList.remove('hidden-ui'); });
+
+log('Ready. Tap ⚙ Options to connect the board (range is read from it — no calibration), or press Enter to play with the keyboard.');
+</script>
+</body>
+</html>

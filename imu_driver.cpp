@@ -58,18 +58,18 @@ bool IMUDriver::update() {
     constexpr float G          = 9.80665f;
     constexpr float DPS_TO_RAD = 3.14159265f / 180.0f;
 
-    // The IMU is both mounted rotated 90° about the board's vertical axis AND
-    // flipped front-to-back (mounted upside down). Two corrections compose:
+    // The IMU is mounted rotated about the board's vertical axis AND flipped
+    // front-to-back (mounted upside down). The corrections compose:
     //
-    //   1. 90° clockwise viewed from above (x' = y, y' = -x) — so front-tip
-    //      drives pitch and right-tip drives roll, instead of front-tip
-    //      driving roll.
-    //   2. 180° about the left-right axis (negate Y and Z) — undo the
-    //      upside-down mount. Without this the resting roll sits near ±180°,
-    //      so a tiny left-tip crosses the atan2 wrap boundary (the −7°→350°
-    //      clipping seen on the dashboard).
+    //   1. Mount rotation about vertical + an extra 90° clockwise (viewed from
+    //      above, "front → right"): net body X/Y mapping x→x, y→-y. (This is the
+    //      original x→y, y→x sensor remap with one further 90° CW applied:
+    //      x'=y_old, y'=-x_old.) After it, a forward tilt reads as a right-side
+    //      tilt and a right tilt reads as a backward tilt.
+    //   2. 180° about the left-right axis (negate Z) — undo the upside-down
+    //      mount so the resting pose doesn't sit near the atan2 wrap boundary.
     //
-    // Composed, the sensor→body mapping is x→y, y→x, z→-z. Applied to accel
+    // Composed, the sensor→body mapping is x→x, y→-y, z→-z. Applied to accel
     // and gyro identically so the Mahony filter stays self-consistent. (Gyro
     // is a rotation rate; under a proper rotation it transforms as a vector.)
     float raw_ax = imu_.readFloatAccelX() * G;
@@ -77,11 +77,11 @@ bool IMUDriver::update() {
     float raw_gx = imu_.readFloatGyroX() * DPS_TO_RAD - gx_bias_;
     float raw_gy = imu_.readFloatGyroY() * DPS_TO_RAD - gy_bias_;
 
-    ax_ =  raw_ay;
-    ay_ =  raw_ax;
+    ax_ =  raw_ax;
+    ay_ = -raw_ay;
     az_ = -imu_.readFloatAccelZ() * G;
-    gx_ =  raw_gy;
-    gy_ =  raw_gx;
+    gx_ =  raw_gx;
+    gy_ = -raw_gy;
     gz_ = -(imu_.readFloatGyroZ() * DPS_TO_RAD - gz_bias_);
 
     new_data_     = true;
