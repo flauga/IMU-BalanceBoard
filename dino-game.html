@@ -312,8 +312,21 @@ function setConnected(on){
   $('btnReread').disabled = !on;
 }
 
+// Web Bluetooth is unavailable on all iOS browsers (Safari/Chrome/Edge on iPhone
+// & iPad use Apple's WebKit, which has no Web Bluetooth). Detect iOS so we give
+// correct advice — "open in Chrome" is impossible on iPhone (Chrome iOS is WebKit).
+function isIOS(){
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ||
+         /CriOS|FxiOS|EdgiOS/.test(navigator.userAgent);
+}
+function bleUnsupportedReason(){
+  if(navigator.bluetooth) return '';
+  if(isIOS()) return 'iPhone/iPad browsers can’t use Bluetooth. Install the free “Bluefy” app from the App Store, then open this page inside Bluefy.';
+  return 'Web Bluetooth isn’t available in this browser. Use Chrome or Edge on Android, Windows, macOS, or Linux.';
+}
 if(!navigator.bluetooth){
-  log('Web Bluetooth not available — open this file in Chrome or Edge.');
+  log(bleUnsupportedReason());
   log('Keyboard play still works: ↑/Space = jump, ↓ = duck, Enter = start.');
   $('btnConnect').disabled = true;
 }
