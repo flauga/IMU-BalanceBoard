@@ -721,8 +721,29 @@ function setConnected(yes) {
   if (BEGINNER) bgnrSetConnected(yes);
 }
 
+// Web Bluetooth is unavailable on all iOS browsers (Safari/Chrome/Edge on iPhone
+// & iPad all use Apple's WebKit, which has never shipped Web Bluetooth) and on
+// some desktop browsers. Detect the platform so we give correct advice instead of
+// the impossible "open in Chrome" (Chrome on iOS can't do it either).
+function isIOS() {
+  // iPadOS 13+ reports as Mac, so also treat a touch-capable "Mac" as iOS.
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ||
+         /CriOS|FxiOS|EdgiOS/.test(navigator.userAgent);   // Chrome/FF/Edge on iOS
+}
+// Returns a user-facing reason string if BLE can't work here, or '' if it can.
+function bleUnsupportedReason() {
+  if (navigator.bluetooth) return '';
+  if (isIOS()) {
+    return 'iPhone/iPad browsers can’t use Bluetooth. Install the free “Bluefy” ' +
+           'app from the App Store, then open this same page inside Bluefy and tap Connect.';
+  }
+  return 'Web Bluetooth isn’t available in this browser. Use Chrome or Edge on ' +
+         'Android, Windows, macOS, or Linux.';
+}
+
 if (!navigator.bluetooth) {
-  log('Web Bluetooth not available. Open this page in Chrome or Edge.', 'err');
+  log(bleUnsupportedReason(), 'err');
 }
 
 // Attach (or re-attach) to the GATT service of the already-chosen device.
@@ -753,7 +774,15 @@ async function attachGatt() {
 }
 
 async function connectBoard() {
-  if (!navigator.bluetooth) { log('Web Bluetooth not available in this browser.', 'err'); return; }
+  const reason = bleUnsupportedReason();
+  if (reason) {
+    // Surface the reason where the user is actually looking, not just the log:
+    // the beginner connect screen has a hint line; show it there too.
+    log(reason, 'err');
+    const hint = $('bg-connect-hint');
+    if (hint) hint.textContent = reason;
+    return;
+  }
   try {
     log('Requesting device…');
     device = await navigator.bluetooth.requestDevice({
