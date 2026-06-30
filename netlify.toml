@@ -9,6 +9,15 @@
   publish    = "dashboards"
   functions  = "netlify/functions"
 
+# The site root serves the SteadySteps game so players land straight in it.
+# There is no index.html (the dashboards are standalone pages), so without this
+# redirect the bare "/" URL 404s. The testing dashboard is intentionally NOT
+# linked from anywhere — reach it directly at /testingdashboard.html.
+[[redirects]]
+  from   = "/"
+  to     = "/steadysteps.html"
+  status = 302
+
 # Local dev: `netlify dev` serves dashboards/ and the functions on one origin
 # (http://localhost:8888) so the browser can call /.netlify/functions/* with no
 # CORS and the .env token stays server-side.
