@@ -9,6 +9,12 @@
   publish    = "dashboards"
   functions  = "netlify/functions"
 
+[build.environment]
+  # AIRTABLE_BASE_ID is not a secret (it's like a database name) and appears in
+  # the code/docs by design, so exclude it from Netlify's secrets scanner. The
+  # real secret, AIRTABLE_PAT, is NOT in any committed file and is still scanned.
+  SECRETS_SCAN_OMIT_KEYS = "AIRTABLE_BASE_ID"
+
 # The site root serves the SteadySteps game so players land straight in it.
 # There is no index.html (the dashboards are standalone pages), so without this
 # redirect the bare "/" URL 404s. The testing dashboard is intentionally NOT
