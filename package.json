@@ -1,0 +1,12 @@
+{
+  "name": "imu-balanceboard-dashboards",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static BLE dashboards + Netlify Functions proxying Airtable (board registration + gameplay sessions).",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "netlify dev"
+  }
+}

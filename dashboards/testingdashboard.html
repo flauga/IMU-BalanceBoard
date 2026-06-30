@@ -141,6 +141,20 @@ button:disabled { opacity: .3; cursor: not-allowed; }
 </div>
 
 <div class="card">
+  <div class="card-title">Board registration</div>
+  <div class="controls" style="align-items:center;flex-wrap:wrap;gap:10px;">
+    <span style="font-size:13px;color:var(--text2);">Board ID:</span>
+    <span id="reg-boardid" style="font-family:monospace;font-weight:700;color:var(--text2);">—</span>
+    <button id="btn-register" class="btn-green" disabled>Register board</button>
+    <span id="reg-status" style="font-size:12px;color:var(--text2);"></span>
+  </div>
+  <div style="font-size:12px;color:var(--text2);margin-top:6px;">
+    Registers this board (by its unique MAC id) in the Airtable boards table.
+    Calibrate first, then register. Re-registering updates the same row.
+  </div>
+</div>
+
+<div class="card">
   <div class="card-title">Tuning</div>
   <div id="tune-body" class="tune-rows" style="opacity:.4;pointer-events:none">
     <div class="tune-presets">
@@ -286,9 +300,10 @@ button:disabled { opacity: .3; cursor: not-allowed; }
 // ───────────────────────────────────────────────────────────────────────────
 // BLE UUIDs — must match config.h on the firmware.
 // ───────────────────────────────────────────────────────────────────────────
-const SVC_UUID    = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const ANGLES_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const CMD_UUID    = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const SVC_UUID     = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const ANGLES_UUID  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const CMD_UUID     = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const BOARDID_UUID = "6e400004-b5a3-f393-e0a9-e50e24dcca9e";  // read-only per-board MAC id
 
 // ── DOM helpers ────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -309,6 +324,7 @@ let device     = null;
 let anglesChar = null;
 let cmdChar    = null;
 let connected  = false;
+let boardId    = null;   // the board's stable MAC id, read from BOARDID_UUID on connect
 
 function setConnected(yes) {
   connected = yes;
@@ -360,6 +376,14 @@ $('btn-connect').addEventListener('click', async () => {
     const svc    = await server.getPrimaryService(SVC_UUID);
     anglesChar   = await svc.getCharacteristic(ANGLES_UUID);
     cmdChar      = await svc.getCharacteristic(CMD_UUID);
+    // Read the board's stable identity (MAC) so it can be registered to Airtable.
+    // Firmware predating the board-ID characteristic just leaves boardId null.
+    try {
+      const idChar = await svc.getCharacteristic(BOARDID_UUID);
+      const idVal  = await idChar.readValue();
+      boardId = new TextDecoder().decode(idVal).trim() || null;
+    } catch { boardId = null; }
+    setBoardId(boardId);
     await anglesChar.startNotifications();
     anglesChar.addEventListener('characteristicvaluechanged', onAngles);
     setConnected(true);
@@ -379,8 +403,51 @@ $('btn-disconnect').addEventListener('click', () => {
   if (device && device.gatt.connected) device.gatt.disconnect();
 });
 
+// ── Board registration (Airtable, via the Netlify functions proxy) ──────────
+// Reflect the board id in the UI and gate the Register button on having one.
+function setBoardId(id) {
+  $('reg-boardid').textContent = id || '—';
+  $('reg-boardid').style.color = id ? 'var(--green, #4ade80)' : 'var(--text2)';
+  $('btn-register').disabled   = !id;
+  $('reg-status').textContent  = '';
+}
+
+$('btn-register').addEventListener('click', async () => {
+  if (!boardId) return;
+  const btn = $('btn-register');
+  btn.disabled = true;
+  $('reg-status').textContent = 'Registering…';
+  $('reg-status').style.color = 'var(--text2)';
+  try {
+    const today = new Date().toISOString().slice(0, 10);   // YYYY-MM-DD
+    const r = await fetch('/.netlify/functions/register-board', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mac: boardId,
+        deviceModel: 'XIAO MG24',
+        manufactureDate: today,
+        status: 'Active',
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    const verb = j.created ? 'Registered' : 'Updated';
+    $('reg-status').textContent = verb + ' ✓';
+    $('reg-status').style.color = 'var(--green, #4ade80)';
+    log(`${verb} board ${boardId} in Airtable.`, 'ok');
+  } catch (e) {
+    $('reg-status').textContent = 'Failed';
+    $('reg-status').style.color = 'var(--red, #f87171)';
+    log('Board registration failed: ' + e.message, 'err');
+  } finally {
+    if (boardId) btn.disabled = false;
+  }
+});
+
 function onDisconnected() {
   setConnected(false);
+  boardId = null; setBoardId(null);
   if (recording) stopRecording();
   log('Disconnected.', 'warn');
 }

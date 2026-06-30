@@ -6,3 +6,11 @@
 dashboard/node_modules/
 dashboard/dist/
 dashboard/sessions/
+
+# Netlify / Airtable
+.env
+.env.*
+!.env.example
+node_modules/
+.netlify/
+deno.lock

@@ -1,0 +1,16 @@
+# Netlify configuration for the IMU Balance Board dashboards.
+#
+# The dashboards are plain static HTML in dashboards/ and are published at the
+# site root (so https://<site>/steadysteps.html, /testingdashboard.html, ...).
+# The Airtable Personal Access Token NEVER ships to the browser — it lives in a
+# Netlify environment variable (AIRTABLE_PAT) read only by the functions below.
+
+[build]
+  publish    = "dashboards"
+  functions  = "netlify/functions"
+
+# Local dev: `netlify dev` serves dashboards/ and the functions on one origin
+# (http://localhost:8888) so the browser can call /.netlify/functions/* with no
+# CORS and the .env token stays server-side.
+[dev]
+  publish = "dashboards"

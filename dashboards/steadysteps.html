@@ -295,6 +295,7 @@ body.bgnr #bgnr-top { display:flex; position:fixed; top:0; left:0; right:0; heig
 #bg-play-bar { display:none; position:fixed; bottom:0; left:0; right:0; z-index:66;
   flex-direction:column; align-items:center; gap:8px; padding:14px 16px 22px;
   background:linear-gradient(0deg,#07090F 72%,transparent); font-family:'Space Grotesk',sans-serif; color:#D8DCE8; }
+#bg-fly-opts-btn { position:fixed; top:14px; right:14px; z-index:67; }
 #bg-reconnect { display:none; position:fixed; inset:0; z-index:80; flex-direction:column; align-items:center; justify-content:center;
   gap:8px; background:rgba(7,9,15,0.84); color:#FFE66D; font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:1.15rem; text-align:center; }
 #bg-reconnect .br-sub { color:#8090B0; font-weight:500; font-size:0.82rem; }
@@ -362,8 +363,7 @@ body.bgnr #bgnr-top { display:flex; position:fixed; top:0; left:0; right:0; heig
   <div class="bg-tag">Your path</div>
   <div class="bg-path" id="bg-path"></div>
   <button class="bg-btn" id="bg-btn-play" style="display:none;">▶ Start</button>
-  <button class="bg-ghost" id="bg-btn-unlock" style="padding:9px 20px;font-size:0.8rem;">🔓 Unlock all</button>
-  <div class="bg-hint" id="bg-unlock-hint" style="font-size:0.78rem;">Your forward/back range is read from the board. To change it, set it once in the <a href="./testingdashboard.html" style="color:#4ECDC4;">testing dashboard</a>.</div>
+  <div class="bg-hint" style="font-size:0.78rem;">Your forward/back range is read from the board. To change it, set it once in the <a href="./testingdashboard.html" style="color:#4ECDC4;">testing dashboard</a>.</div>
 </div>
 
 <div class="bg-screen" id="bg-instr">
@@ -409,9 +409,10 @@ body.bgnr #bgnr-top { display:flex; position:fixed; top:0; left:0; right:0; heig
 <div id="bg-play-bar">
   <div style="display:flex;gap:10px;">
     <button class="bg-ghost" id="bg-btn-quit">Quit</button>
-    <button class="bg-ghost" id="bg-fly-opts-btn" style="display:none;">⚙ Options</button>
   </div>
 </div>
+<!-- In-game options menu, top-right of the play view (FLIGHT difficulty settings). -->
+<button class="bg-ghost" id="bg-fly-opts-btn" style="display:none;">⚙ Options</button>
 <div id="bg-reconnect">🔄 Reconnecting to your board…<div class="br-sub">hold on — your game is paused</div></div>
 
 <!-- FLIGHT difficulty panel — only reachable once the operator password is entered. -->
@@ -586,8 +587,8 @@ const BEGINNER = true;
 // run, which calls tickBeginner()/drawBeginner(). Functions are hoisted and
 // live further down; only this state/config needs to be up here.
 const BG_BEST_KEY = 'ss_best_v3', BG_PROG_KEY = 'ss_prog_v1';
-const BG_UNLOCK_KEY = 'ss_unlock_v1';   // '1' once the operator password unlocks everything
-const BG_UNLOCK_PW  = 'claude1';
+const FLY_CFG_PW = 'claude1';           // operator password gating the FLIGHT difficulty panel
+let   flyCfgAuthed = false;             // in-memory: re-asks for the password each session
 const BG_FLY_CFG_KEY = 'ss_fly_cfg_v1'; // L5 difficulty sliders (operator-tunable)
 const BG_ZONE = 0.40, BG_REACH = 0.80, BG_RESET = 0.30, BG_CD_S = 3;
 // Hold scoring (L1/L2): points/sec when perfectly centered + still, and the
@@ -673,12 +674,12 @@ const BG_LEVELS = {
   // A vertical-only pursuit: lean to the target's height and stay there. After
   // you hold it for `holdToClear` seconds the target is cleared (+points) and a
   // new one appears at a different height. Clear as many as you can in `dur`.
-  4: { name:'TRACK', kind:'track', dur:35, color:'#A78BFA', tol:0.16,
-       holdToClear:2.0, spawnAmp:0.72, minSpawnGap:0.5, masterPct:0.65,
-       blurb:'A target appears at a height. Lean to it and hold steady — clear it, and a new one pops up somewhere else.',
+  4: { name:'TRACK', kind:'track', dur:35, color:'#A78BFA', tol:0.26, zoneW:0.62,
+       holdToClear:2.0, spawnAmp:0.66, minSpawnGap:0.5, masterPct:0.65,
+       blurb:'A target zone appears at a height. Lean to it and hold steady — clear it, and a new one pops up somewhere else.',
        steps:[ ['1','Find your <strong>balance</strong> — your dot sits in the middle.'],
-               ['2','A <strong>target ring</strong> appears at a <strong>fixed height</strong>.'],
-               ['3','Lean to keep <strong>your dot inside the target</strong> and hold steady.'],
+               ['2','A <strong>target box</strong> appears at a <strong>fixed height</strong>.'],
+               ['3','Lean to keep <strong>your dot inside the box</strong> and hold steady.'],
                ['4','Hold it ~2s to <strong>clear it</strong> — a new one appears elsewhere. Clear as many as you can!'] ] },
   // L5 FLIGHT — a continuous side-scroller. The dino's height tracks your lean;
   // fly UP over trees (rising from the floor) and DOWN under other dinos
@@ -1773,80 +1774,42 @@ function savePrefs() {
       { sound: soundOn, mode: $('g-mode').value, stance, daily: dailyActive }));
   } catch {}
 }
-// ── Cloud leaderboard — Firebase RTDB (motherofdashboard) at /ferraBalance ──
-// REST + anonymous auth keeps this single-file (no SDK). Every score is also
-// POSTed to the shared gym database, and loadLB() merges cloud + local so all
-// devices see one board. If anonymous auth or the /ferraBalance rules aren't
-// enabled yet, everything silently falls back to the local board.
-const FB_DB     = 'https://motherofdashboard-default-rtdb.asia-southeast1.firebasedatabase.app';
-const FB_KEY    = 'AIzaSyC5mZAG98VAeDpp1IssYYQ2kcKeClyqIGc';
-const FB_RT_KEY = 'bb_fb_refresh_v1';        // anonymous-user refresh token
-
-// Per-board score namespace. The board reports a stable identity over BLE
-// (boardId); each physical board gets its OWN cloud leaderboard branch, so the
-// scores you see are this board's scores — auto-detected on connect, no login.
-// Firmware without the board-ID characteristic falls back to the shared branch
-// (backwards-compatible with existing saved scores).
+// ── Cloud leaderboard — Airtable (via the Netlify functions proxy) ──────────
+// The dashboards are served by Netlify; the Airtable token lives server-side in
+// a function, never in this page. We READ a per-board leaderboard from the
+// Gameplay Sessions table and RECORD each beginner-level finish there. loadLB()
+// still merges cloud + local so a device shows scores even offline.
+//
+// Per-board: the board reports a stable identity over BLE (boardId), and the
+// proxy keys every session to that board. Firmware without the board-ID
+// characteristic leaves boardId null → cloud calls are skipped (local only).
 let boardId = null;                          // set on connect from the board
-function fbLbPath() {
-  return boardId
-    ? '/ferraBalance/v1/boards/' + encodeURIComponent(boardId) + '/lb'
-    : '/ferraBalance/v1/lb';                  // legacy shared branch
-}
 
 let cloudLB = [];          // latest fetched entries for the current board
 let cloudOK = false;       // true once a fetch succeeds
-let fbToken = null, fbTokenExp = 0;
 
 // Called when a board connects (boardId set) or fails to identify (null). Clears
 // the cached cloud board for the previous board and re-fetches this board's scores.
 function onBoardIdentified(id) {
   cloudLB = []; cloudOK = false;             // drop the prior board's cached cloud scores
-  cloudFetchLB();                            // pull this board's arcade leaderboard
-  if (typeof bgCloudFetchBest === 'function') bgCloudFetchBest();  // and beginner bests
+  cloudFetchLB();                            // pull this board's leaderboard from Airtable
   if (typeof bgRenderMenu === 'function') bgRenderMenu();          // re-render with this board's local bests
   if (typeof refreshIdleInfo === 'function') refreshIdleInfo();
 }
 
-async function fbAuthToken() {
-  if (fbToken && Date.now() < fbTokenExp - 60000) return fbToken;
-  try {
-    // Reuse the same anonymous user across sessions via its refresh token.
-    const rt = localStorage.getItem(FB_RT_KEY);
-    if (rt) {
-      const r = await fetch('https://securetoken.googleapis.com/v1/token?key=' + FB_KEY, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(rt),
-      });
-      if (r.ok) {
-        const j = await r.json();
-        fbToken = j.id_token; fbTokenExp = Date.now() + (+j.expires_in || 3600) * 1000;
-        try { localStorage.setItem(FB_RT_KEY, j.refresh_token); } catch {}
-        return fbToken;
-      }
-    }
-    const r = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=' + FB_KEY, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: '{"returnSecureToken":true}',
-    });
-    if (!r.ok) return null;
-    const j = await r.json();
-    fbToken = j.idToken; fbTokenExp = Date.now() + (+j.expiresIn || 3600) * 1000;
-    try { localStorage.setItem(FB_RT_KEY, j.refreshToken); } catch {}
-    return fbToken;
-  } catch { return null; }
-}
-
+// Fetch this board's top sessions from Airtable and shape them like the local
+// leaderboard entries the renderer expects ({ score, t, ... }).
 async function cloudFetchLB() {
+  if (!boardId) { cloudLB = []; cloudOK = false; return; }
   try {
-    const tok = await fbAuthToken();
-    if (!tok) throw new Error('no auth');
-    const r = await fetch(`${FB_DB}${fbLbPath()}.json?auth=${tok}`);
+    const r = await fetch('/.netlify/functions/leaderboard?mac=' +
+                          encodeURIComponent(boardId) + '&limit=10');
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json() || {};
-    cloudLB = Object.values(data).filter(e => e && typeof e.score === 'number');
-    if (!cloudOK) { cloudOK = true; log('Leaderboard: synced with gym cloud', 'ok'); }
+    const j = await r.json();
+    cloudLB = (j.entries || [])
+      .filter(e => typeof e.score === 'number')
+      .map(e => ({ score: e.score, t: e.t || 0 }));
+    if (!cloudOK) { cloudOK = true; log('Leaderboard: synced with cloud', 'ok'); }
     refreshIdleInfo();
   } catch (e) {
     if (cloudOK) log('Leaderboard sync lost — showing local scores', 'warn');
@@ -1854,47 +1817,15 @@ async function cloudFetchLB() {
   }
 }
 
-function cloudPushLB(entry) {
-  const path = fbLbPath();                   // capture this board's branch now
-  fbAuthToken().then(tok => {
-    if (!tok) return;
-    return fetch(`${FB_DB}${path}.json?auth=${tok}`,
-                 { method: 'POST', body: JSON.stringify(entry) })
-      .then(() => cloudFetchLB());
-  }).catch(() => {});
-}
-
-// ── Per-board SteadySteps best scores in the cloud ───────────────────────────
-// Mirror the beginner-mode best score for each level under the board's branch so
-// the board's bests survive a browser wipe and follow the physical board across
-// machines. Path: /ferraBalance/v1/boards/{boardId}/best/{level} = number.
-function fbBestPath(){
-  return boardId ? '/ferraBalance/v1/boards/' + encodeURIComponent(boardId) + '/best' : null;
-}
-function bgCloudSaveBest(lvl, val){
-  const base = fbBestPath(); if(!base) return;       // only when a board is known
-  fbAuthToken().then(tok => {
-    if(!tok) return;
-    return fetch(`${FB_DB}${base}/${lvl}.json?auth=${tok}`,
-                 { method:'PUT', body: JSON.stringify(val) });
-  }).catch(()=>{});
-}
-// Pull cloud bests on connect and merge into local (keep the max of each).
-function bgCloudFetchBest(){
-  const base = fbBestPath(); if(!base) return;
-  fbAuthToken().then(tok => {
-    if(!tok) return;
-    return fetch(`${FB_DB}${base}.json?auth=${tok}`).then(r => r.ok ? r.json() : null).then(remote => {
-      if(!remote || typeof remote !== 'object') return;
-      const local = bgLoadBest(); let changed = false;
-      for(const k in remote){
-        const rv = +remote[k];
-        if(Number.isFinite(rv) && (!(k in local) || rv > local[k])){ local[k] = rv; changed = true; }
-      }
-      if(changed){ try{ localStorage.setItem(bgBestKey(), JSON.stringify(local)); }catch{} }
-      if(typeof bgRenderMenu === 'function') bgRenderMenu();   // refresh "best" labels
-    });
-  }).catch(()=>{});
+// Record one beginner-level session to Airtable (fire-and-forget). `level` is a
+// "1".."5" string; `score` an integer. Skipped when no board is identified.
+function cloudRecordSession(level, score) {
+  if (!boardId) return;
+  fetch('/.netlify/functions/record-session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mac: boardId, level: String(level), score: Math.round(score) }),
+  }).then(r => { if (r.ok) cloudFetchLB(); }).catch(() => {});
 }
 
 function loadLocalLB() {
@@ -1953,7 +1884,8 @@ function addLB(initials, score, smallest, modeKey) {
     return counts[k] <= 10;
   });
   try { localStorage.setItem(LB_KEY, JSON.stringify(b)); } catch {}
-  cloudPushLB(entry);                      // share to the gym board (fire-and-forget)
+  // The cloud copy of a beginner score is written as a Gameplay Session at
+  // level finish (see cloudRecordSession); arcade scores stay local-only.
   refreshIdleInfo();
 }
 
@@ -1994,19 +1926,13 @@ $('btn-clear-hist').addEventListener('click', () => {
   updateHistorySummary();
   log(`Game history cleared for ${players.current}`);
 });
-$('btn-clear-lb').addEventListener('click', async () => {
-  const scope = cloudOK ? 'the SHARED gym leaderboard for every device' : 'this device’s leaderboard';
-  if (!confirm(`Clear ${scope}?`)) return;
+$('btn-clear-lb').addEventListener('click', () => {
+  // Clears only this device's local leaderboard. Cloud sessions live in
+  // Airtable and are managed there, not wiped from the dashboard.
+  if (!confirm('Clear this device’s local leaderboard? (Cloud scores in Airtable are kept.)')) return;
   try { localStorage.removeItem(LB_KEY); } catch {}
-  if (cloudOK) {
-    try {
-      const tok = await fbAuthToken();
-      if (tok) await fetch(`${FB_DB}${FB_PATH}.json?auth=${tok}`, { method: 'DELETE' });
-    } catch {}
-    cloudLB = [];
-  }
   refreshIdleInfo();
-  log('Leaderboard cleared');
+  log('Local leaderboard cleared');
 });
 
 // Streak: consecutive calendar days (ending today or yesterday) with ≥1
@@ -3570,24 +3496,19 @@ function bgFmt(s){ s=Math.max(0,Math.floor(s)); return Math.floor(s/60)+':'+Stri
 // Best scores are kept PER BOARD: each physical board has its own key, so when
 // you connect a different board you see that board's bests. Falls back to the
 // legacy un-suffixed key when no board has been identified (e.g. before connect
-// or with old firmware). Bests are also mirrored to the board's cloud branch
-// (bgCloudSaveBest) so they survive a browser/localStorage wipe.
+// or with old firmware). Bests are local to this device.
 function bgBestKey(){ return boardId ? (BG_BEST_KEY + '::' + boardId) : BG_BEST_KEY; }
 function bgLoadBest(){ try { return JSON.parse(localStorage.getItem(bgBestKey()))||{}; } catch { return {}; } }
-function bgSaveBest(lvl,val){ const b=bgLoadBest(); if(!(lvl in b)||val>b[lvl]){ b[lvl]=val; try{localStorage.setItem(bgBestKey(),JSON.stringify(b));}catch{} bgCloudSaveBest(lvl, b[lvl]); } }
+function bgSaveBest(lvl,val){
+  const b=bgLoadBest(); if(!(lvl in b)||val>b[lvl]){ b[lvl]=val; try{localStorage.setItem(bgBestKey(),JSON.stringify(b));}catch{} }
+  // Record EVERY beginner-level finish to Airtable (not just new bests). Called
+  // once per level end (the 5 bgEnd* functions), with the level's final score.
+  cloudRecordSession(lvl, val);
+}
 // ── Level progress / unlocking (the path map) ──
 function bgLoadProgress(){ try { const p=JSON.parse(localStorage.getItem(BG_PROG_KEY)); return (p&&p.completed)?p:{completed:{}}; } catch { return {completed:{}}; } }
 function bgSaveProgress(p){ try{ localStorage.setItem(BG_PROG_KEY, JSON.stringify(p)); }catch{} }
-// Operator password unlock: persisted, unlocks ALL levels (ignoring progress)
-// and the L5 difficulty options. Entered once per browser via the menu.
-function bgIsAllUnlocked(){ try { return localStorage.getItem(BG_UNLOCK_KEY) === '1'; } catch { return false; } }
-function bgTryUnlock(){
-  const pw = prompt('Enter unlock password:');
-  if(pw === null) return false;
-  if(pw === BG_UNLOCK_PW){ try{ localStorage.setItem(BG_UNLOCK_KEY, '1'); }catch{} return true; }
-  return false;
-}
-function bgIsUnlocked(k){ if(k<=1) return true; if(bgIsAllUnlocked()) return true; return !!bgLoadProgress().completed[k-1]; }   // unlock once the previous is finished, or all via password
+function bgIsUnlocked(k){ if(k<=1) return true; return !!bgLoadProgress().completed[k-1]; }   // unlock once the previous level is finished
 function bgTurtleLevel(){ const order=[1,2,3,4,5]; let t=1; for(const k of order){ if(bgIsUnlocked(k)) t=k; } return t; }   // turtle sits on the furthest unlocked level
 function bgMarkComplete(k, mastered){                                                         // returns the level number that JUST unlocked, else 0
   if(!mastered) return 0;                                                                     // must MASTER a level to complete it + unlock the next
@@ -3924,9 +3845,10 @@ function bgShow(phase){
   ['bg-connect','bg-setup','bg-menu','bg-instr','bg-result'].forEach(id => { const el=$(id); if(el) el.style.display='none'; });
   if(full[phase]) $(full[phase]).style.display='flex';
   $('bg-play-bar').style.display  = phase==='play'  ? 'flex' : 'none';
-  // FLIGHT options toggle: only on the FLIGHT level AND only once unlocked.
+  // FLIGHT options toggle: shown on the FLIGHT level; opening it asks for the
+  // settings password (see the bg-fly-opts-btn handler).
   const isFly = phase==='play' && BG_LEVELS[BG.level] && BG_LEVELS[BG.level].kind==='fly';
-  if($('bg-fly-opts-btn')) $('bg-fly-opts-btn').style.display = (isFly && bgIsAllUnlocked()) ? '' : 'none';
+  if($('bg-fly-opts-btn')) $('bg-fly-opts-btn').style.display = isFly ? '' : 'none';
   if(phase !== 'play' && $('bg-fly-panel')) $('bg-fly-panel').classList.remove('on');
   if(phase !== 'play') bgReconnect(false);
 }
@@ -4024,38 +3946,37 @@ function drawBeginner(roll, pitch){
     }
   }
   if(playing && L.kind==='track'){
-    // A STATIONARY target ring sitting at a fixed height. Lean your dot onto it
-    // and hold steady — the ring fills a progress arc, then clears & respawns.
+    // A STATIONARY rectangular target zone sitting at a fixed height (same box
+    // style as L1–3). Lean your dot inside and hold steady — a progress bar
+    // fills, then the zone clears & respawns elsewhere.
     const target = bgTrackTargetY();
-    const tcy = cy - target*RR;
-    const r   = L.tol*RR;                               // ring radius = tolerance window
-    const onit = Math.abs(bgLiveY()-target) <= L.tol;
-    const prog = clamp(BG.trackProgress||0, 0, 1);
+    const tcy   = cy - target*RR;
+    const halfH = L.tol*RR;                              // zone half-height = tolerance window
+    const halfW = (L.zoneW ?? 0.6) * RR;                 // zone half-width across the arena
+    const onit  = Math.abs(bgLiveY()-target) <= L.tol;
+    const prog  = clamp(BG.trackProgress||0, 0, 1);
     // brief expanding flash right after a target is cleared
     const flashAge = BG.trackFlashT ? (performance.now()-BG.trackFlashT) : 1e9;
     if(flashAge < 350){
-      const fa = flashAge/350;
-      tiltCtx.beginPath(); tiltCtx.arc(cx, cy - (BG._flashY||0)*RR, r*(1+fa*1.6), 0, Math.PI*2);
-      tiltCtx.strokeStyle = `rgba(167,139,250,${0.6*(1-fa)})`; tiltCtx.lineWidth=3; tiltCtx.stroke();
+      const fa = flashAge/350, fcy = cy - (BG._flashY||0)*RR;
+      tiltCtx.strokeStyle = `rgba(167,139,250,${0.6*(1-fa)})`; tiltCtx.lineWidth=3;
+      tiltCtx.strokeRect(cx-halfW*(1+fa*0.4), fcy-halfH*(1+fa*1.6),
+                         halfW*2*(1+fa*0.4), halfH*2*(1+fa*1.6));
     }
-    // soft fill + ring outline
-    tiltCtx.beginPath(); tiltCtx.arc(cx, tcy, r, 0, Math.PI*2);
+    // soft fill + dashed box outline (brighter when the dot is inside)
     tiltCtx.fillStyle = onit ? 'rgba(167,139,250,0.22)' : 'rgba(167,139,250,0.08)';
-    tiltCtx.fill();
+    tiltCtx.fillRect(cx-halfW, tcy-halfH, halfW*2, halfH*2);
     tiltCtx.strokeStyle = onit ? '#A78BFA' : 'rgba(167,139,250,0.55)';
     tiltCtx.lineWidth=2; tiltCtx.setLineDash(onit?[]:[6,6]);
-    tiltCtx.stroke(); tiltCtx.setLineDash([]);
-    // hold-to-clear progress arc, sweeping clockwise from the top
+    tiltCtx.strokeRect(cx-halfW, tcy-halfH, halfW*2, halfH*2); tiltCtx.setLineDash([]);
+    // hold-to-clear progress bar along the box's top edge, filling left→right
     if(prog>0){
-      tiltCtx.beginPath();
-      tiltCtx.arc(cx, tcy, r+5*k, -Math.PI/2, -Math.PI/2 + prog*Math.PI*2);
       tiltCtx.strokeStyle='#FFE66D'; tiltCtx.lineWidth=3*k; tiltCtx.lineCap='round';
+      tiltCtx.beginPath();
+      tiltCtx.moveTo(cx-halfW, tcy-halfH-5*k);
+      tiltCtx.lineTo(cx-halfW + prog*halfW*2, tcy-halfH-5*k);
       tiltCtx.stroke(); tiltCtx.lineCap='butt';
     }
-    // centre glyph
-    tiltCtx.fillStyle = onit ? '#A78BFA' : 'rgba(167,139,250,0.7)';
-    tiltCtx.textAlign='center'; tiltCtx.font=F(13,800,true);
-    tiltCtx.fillText('◎', cx, tcy+5*k);
   }
   if(playing && L.kind==='pacer'){
     const pa = bgPacerAngle();
@@ -4524,8 +4445,6 @@ function bgEndMemory(){
 
 // ── menu / instructions / nav ────────────────────────────────────────────────
 function bgRenderMenu(){
-  // Reflect unlock state on the menu button.
-  if($('bg-btn-unlock')) $('bg-btn-unlock').textContent = bgIsAllUnlocked() ? '🔓 All unlocked' : '🔓 Unlock all';
   const wrap=$('bg-path'); if(!wrap) return;
   const best=bgLoadBest(), prog=bgLoadProgress(), turtleAt=bgTurtleLevel();
   const order=[1,2,3,4,5];
@@ -4697,17 +4616,19 @@ function bgnrInit(){
   $('bg-btn-menu').addEventListener('click', () => { bgShow('menu'); bgRenderMenu(); });
   $('bg-btn-quit').addEventListener('click', () => { releaseWakeLock(); BG.phase='menu'; bgShow('menu'); bgRenderMenu(); });
 
-  // ── Operator password unlock (menu) ──
-  if($('bg-btn-unlock')) $('bg-btn-unlock').addEventListener('click', () => {
-    if(bgIsAllUnlocked()){ bgRenderMenu(); return; }
-    if(bgTryUnlock()){ beep(1047,150); bgRenderMenu(); }
-    else { $('bg-unlock-hint') && ($('bg-unlock-hint').textContent='Wrong password.'); }
-  });
-
-  // ── FLIGHT difficulty panel (gated: only reachable once unlocked) ──
+  // ── FLIGHT difficulty panel — opened from the in-game ⚙ Options button.
+  // Gated behind the operator password (asked once per session, in-memory).
   flyLoadCfg();
   buildFlyParams();
-  if($('bg-fly-opts-btn')) $('bg-fly-opts-btn').addEventListener('click', () => $('bg-fly-panel').classList.add('on'));
+  if($('bg-fly-opts-btn')) $('bg-fly-opts-btn').addEventListener('click', () => {
+    if(!flyCfgAuthed){
+      const pw = prompt('Enter settings password:');
+      if(pw === null) return;                 // cancelled
+      if(pw !== FLY_CFG_PW){ alert('Wrong password.'); return; }
+      flyCfgAuthed = true; beep(1047,150);
+    }
+    $('bg-fly-panel').classList.add('on');
+  });
   if($('bg-fly-close'))    $('bg-fly-close').addEventListener('click', () => $('bg-fly-panel').classList.remove('on'));
   if($('bg-fly-reset'))    $('bg-fly-reset').addEventListener('click', () => { FLY_CFG=Object.assign({},FLY_DEFAULTS); flySaveCfg(); buildFlyParams(); });
 
