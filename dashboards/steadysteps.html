@@ -248,6 +248,11 @@ body.bgnr #bgnr-top { display:flex; position:fixed; top:0; left:0; right:0; heig
 .bg-ghost { background:#252A3A; color:#D8DCE8; border:none; border-radius:12px; padding:12px 26px; font-weight:600;
   letter-spacing:1px; text-transform:uppercase; cursor:pointer; font-family:'Space Grotesk',sans-serif; }
 .bg-hint { color:#5A6488; font-size:0.85rem; max-width:340px; line-height:1.5; }
+.bg-hint a { color:#4ECDC4; }
+.bg-spinner { width:52px; height:52px; border-radius:50%; border:4px solid #1E2438;
+  border-top-color:#4ECDC4; animation:bg-spin 0.9s linear infinite; }
+@keyframes bg-spin { to { transform:rotate(360deg); } }
+.bg-synced { color:#7BFF72; font-weight:600; }
 .bg-cards { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; max-width:760px; }
 .bg-card { background:#0D1018; border:2px solid #252A3A; border-radius:18px; padding:18px 16px; width:172px;
   text-align:left; cursor:pointer; transition:transform .15s, border-color .15s; }
@@ -342,20 +347,13 @@ body.bgnr #bgnr-top { display:flex; position:fixed; top:0; left:0; right:0; heig
   <div class="bg-hint" id="bg-connect-hint">Switch on your board, then connect. Chrome or Edge required.</div>
 </div>
 
-<!-- Shown when the board has no saved forward/back range. Calibration is done
-     ONCE in the testing dashboard and stored on the board; this game just reads
-     it, so there's nothing to lean-calibrate here. -->
-<div class="bg-screen" id="bg-setup">
-  <div class="bg-logo" style="font-size:clamp(1.6rem,5vw,2.4rem)">SET YOUR RANGE</div>
-  <div class="bg-tag">One-time setup</div>
-  <div class="bg-hint" style="max-width:380px;">
-    Your board hasn't learned your forward/back lean yet. Open the
-    <strong>testing dashboard</strong>, lean fully forward and back to mark the
-    edges, then tap <strong>Save</strong>. It's stored on the board, so you only
-    ever do this once — every game reads it automatically.
-  </div>
-  <a class="bg-btn" href="./testingdashboard.html" style="text-decoration:none;">⚙ Open testing dashboard</a>
-  <div class="bg-hint" id="bg-setup-wait" style="font-size:0.78rem;opacity:0.7;">Waiting for your range… this screen advances on its own once it's saved.</div>
+<!-- Simple loading screen shown while the board links up and the game reads its
+     range. No calibration wording — the range lives on the board, and if it has
+     none we fall back to a sensible default so play starts immediately. -->
+<div class="bg-screen" id="bg-loading">
+  <div class="bg-spinner" aria-hidden="true"></div>
+  <div class="bg-logo" style="font-size:clamp(1.6rem,5vw,2.4rem)">CONNECTING</div>
+  <div class="bg-hint" id="bg-loading-msg">Linking up with your board…</div>
 </div>
 
 <div class="bg-screen" id="bg-menu">
@@ -363,7 +361,7 @@ body.bgnr #bgnr-top { display:flex; position:fixed; top:0; left:0; right:0; heig
   <div class="bg-tag">Your path</div>
   <div class="bg-path" id="bg-path"></div>
   <button class="bg-btn" id="bg-btn-play" style="display:none;">▶ Start</button>
-  <div class="bg-hint" style="font-size:0.78rem;">Your forward/back range is read from the board. To change it, set it once in the <a href="./testingdashboard.html" style="color:#4ECDC4;">testing dashboard</a>.</div>
+  <div class="bg-hint" id="bg-menu-synced" style="font-size:0.78rem;"></div>
 </div>
 
 <div class="bg-screen" id="bg-instr">
@@ -378,6 +376,7 @@ body.bgnr #bgnr-top { display:flex; position:fixed; top:0; left:0; right:0; heig
   <div class="bg-grade" id="bg-r-grade">✓</div>
   <div class="bg-pts" id="bg-r-pts">0</div>
   <div class="bg-boxes" id="bg-r-boxes"></div>
+  <div class="bg-hint" id="bg-r-sync" style="font-size:0.76rem;"></div>
   <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">
     <button class="bg-btn" id="bg-btn-retry">↻ Retry</button>
     <button class="bg-ghost" id="bg-btn-menu">☰ Menu</button>
@@ -792,21 +791,63 @@ async function connectBoard() {
     });
     device.addEventListener('gattserverdisconnected', onDisconnected);
     log('Connecting…');
+    if (BEGINNER) { bgSetLoadingMsg('Linking up with your board…'); bgShow('loading'); }
     await attachGatt();
     resetAllVisualsAndAccumulators();
+    rememberDevice(device);                 // so we can auto-reconnect next visit
     log('Connected. Streaming.', 'ok');
-    if (BEGINNER) bgnrOnConnect();
+    if (BEGINNER) { bgSetLoadingMsg('Loading your scores…'); await bgnrOnConnect(); }
   } catch (e) {
     log('Connect failed: ' + e.message, 'err');
     setConnected(false);
-    if (BEGINNER) bgnrConnectFailed(e);
+    if (BEGINNER) { bgShow('connect'); bgnrConnectFailed(e); }
   }
 }
 $('btn-connect').addEventListener('click', connectBoard);
 
 $('btn-disconnect').addEventListener('click', () => {
+  autoReconnectOptOut = true;                 // an explicit disconnect shouldn't silently reconnect next load
+  try { localStorage.removeItem(LAST_DEVICE_KEY); } catch {}
   if (device && device.gatt.connected) device.gatt.disconnect();
 });
+
+// ── Remember the last board so a returning player skips the connect tap ──────
+// Web Bluetooth grants a persistent per-origin permission for a chosen device;
+// navigator.bluetooth.getDevices() lists those we may reconnect to WITHOUT a
+// fresh chooser. We remember the last device.id and, on load, silently reconnect
+// if the browser still allows it. All of this is best-effort: getDevices() is
+// Chromium-only and gated by a flag on some builds, so every step is guarded and
+// failure just leaves the normal Connect button in place.
+const LAST_DEVICE_KEY = 'ss_last_device_v1';
+let autoReconnectOptOut = false;
+function rememberDevice(dev){
+  try { if (dev && dev.id) localStorage.setItem(LAST_DEVICE_KEY, dev.id); } catch {}
+}
+async function tryAutoReconnect(){
+  if (autoReconnectOptOut || connected) return false;
+  let wantId; try { wantId = localStorage.getItem(LAST_DEVICE_KEY); } catch {}
+  if (!wantId || !navigator.bluetooth || !navigator.bluetooth.getDevices) return false;
+  let known;
+  try { known = await navigator.bluetooth.getDevices(); } catch { return false; }
+  const dev = (known || []).find(d => d.id === wantId);
+  if (!dev) return false;
+  try {
+    device = dev;
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    if (BEGINNER) { bgSetLoadingMsg('Reconnecting to your board…'); bgShow('loading'); }
+    log('Reconnecting to your last board…');
+    await attachGatt();                       // may reject if the board is off/out of range
+    resetAllVisualsAndAccumulators();
+    rememberDevice(device);
+    log('Reconnected to your board.', 'ok');
+    if (BEGINNER) { bgSetLoadingMsg('Loading your scores…'); await bgnrOnConnect(); }
+    return true;
+  } catch (e) {
+    setConnected(false);
+    if (BEGINNER) bgShow('connect');          // board not reachable — fall back to the connect screen
+    return false;
+  }
+}
 
 async function onDisconnected() {
   setConnected(false);
@@ -1788,13 +1829,43 @@ let boardId = null;                          // set on connect from the board
 let cloudLB = [];          // latest fetched entries for the current board
 let cloudOK = false;       // true once a fetch succeeds
 
+// Per-board, per-level best scores read back from the cloud — this is what makes
+// "Your best" and level unlocks follow the physical BOARD to any device, not the
+// browser it was first played on. Keyed by level string ("1".."5") → best score.
+let cloudBests = {};       // { "1": 1234, ... } for the current board
+let cloudBestsOK = false;  // true once a bests fetch succeeds (drives the "synced" badge)
+
 // Called when a board connects (boardId set) or fails to identify (null). Clears
 // the cached cloud board for the previous board and re-fetches this board's scores.
 function onBoardIdentified(id) {
   cloudLB = []; cloudOK = false;             // drop the prior board's cached cloud scores
+  cloudBests = {}; cloudBestsOK = false;
   cloudFetchLB();                            // pull this board's leaderboard from Airtable
-  if (typeof bgRenderMenu === 'function') bgRenderMenu();          // re-render with this board's local bests
+  cloudFetchBests();                         // pull this board's per-level bests (cross-device)
+  if (typeof bgRenderMenu === 'function') bgRenderMenu();          // re-render with this board's bests
   if (typeof refreshIdleInfo === 'function') refreshIdleInfo();
+}
+
+// Fetch this board's all-time best score per level from the cloud, then merge
+// into the on-screen bests/unlocks. Any level with a cloud best is treated as
+// "played on some device" so its unlock carries across devices too. Failure is
+// silent — we fall back to whatever this device has locally.
+async function cloudFetchBests() {
+  if (!boardId) { cloudBests = {}; cloudBestsOK = false; return; }
+  try {
+    const r = await fetch('/.netlify/functions/bests?mac=' + encodeURIComponent(boardId));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const b = (j && j.bests) || {};
+    const clean = {};
+    for (const k of Object.keys(b)) { const v = Number(b[k]); if (isFinite(v)) clean[k] = v; }
+    cloudBests = clean; cloudBestsOK = true;
+    if (typeof bgMergeCloudUnlocks === 'function') bgMergeCloudUnlocks();  // carry unlocks across devices
+    if (typeof bgRenderMenu === 'function') bgRenderMenu();
+    log('Scores: this board’s bests synced from cloud', 'ok');
+  } catch (e) {
+    cloudBestsOK = false;                    // keep whatever we already had; stay on local
+  }
 }
 
 // Fetch this board's top sessions from Airtable and shape them like the local
@@ -3493,21 +3564,50 @@ if (!BEGINNER) { cloudFetchLB(); setInterval(cloudFetchLB, 60000); }
 // declared near the top so the rAF loop's first synchronous run can use it.)
 // ═══════════════════════════════════════════════════════════════════════════
 function bgFmt(s){ s=Math.max(0,Math.floor(s)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
-// Best scores are kept PER BOARD: each physical board has its own key, so when
-// you connect a different board you see that board's bests. Falls back to the
-// legacy un-suffixed key when no board has been identified (e.g. before connect
-// or with old firmware). Bests are local to this device.
+// Best scores are kept PER BOARD and follow the board across devices. The cloud
+// (Airtable, keyed by boardId) is the source of truth — cloudBests is fetched on
+// connect. localStorage is a per-device cache/offline fallback, keyed per board.
+// bgLoadBest() returns the MAX of the two so a score set on any device shows up
+// here, while a brand-new best set offline still displays until the cloud syncs.
 function bgBestKey(){ return boardId ? (BG_BEST_KEY + '::' + boardId) : BG_BEST_KEY; }
-function bgLoadBest(){ try { return JSON.parse(localStorage.getItem(bgBestKey()))||{}; } catch { return {}; } }
+function bgLoadLocalBest(){ try { return JSON.parse(localStorage.getItem(bgBestKey()))||{}; } catch { return {}; } }
+function bgLoadBest(){
+  const local = bgLoadLocalBest();
+  const merged = Object.assign({}, local);
+  for (const k of Object.keys(cloudBests)) {           // cloud (cross-device) wins when higher
+    const cv = cloudBests[k];
+    if (!(k in merged) || cv > merged[k]) merged[k] = cv;
+  }
+  return merged;
+}
 function bgSaveBest(lvl,val){
-  const b=bgLoadBest(); if(!(lvl in b)||val>b[lvl]){ b[lvl]=val; try{localStorage.setItem(bgBestKey(),JSON.stringify(b));}catch{} }
+  const b=bgLoadLocalBest(); if(!(lvl in b)||val>b[lvl]){ b[lvl]=val; try{localStorage.setItem(bgBestKey(),JSON.stringify(b));}catch{} }
   // Record EVERY beginner-level finish to Airtable (not just new bests). Called
   // once per level end (the 5 bgEnd* functions), with the level's final score.
   cloudRecordSession(lvl, val);
 }
 // ── Level progress / unlocking (the path map) ──
-function bgLoadProgress(){ try { const p=JSON.parse(localStorage.getItem(BG_PROG_KEY)); return (p&&p.completed)?p:{completed:{}}; } catch { return {completed:{}}; } }
-function bgSaveProgress(p){ try{ localStorage.setItem(BG_PROG_KEY, JSON.stringify(p)); }catch{} }
+// Progress is kept PER BOARD (keyed like the bests) so a board's unlocks follow
+// it across devices, and is reconciled with the cloud on connect: any level the
+// board has a cloud score for is marked complete so the NEXT level is reachable
+// on a fresh device (bgMergeCloudUnlocks). Legacy un-suffixed key is migrated in.
+function bgProgKey(){ return boardId ? (BG_PROG_KEY + '::' + boardId) : BG_PROG_KEY; }
+function bgLoadProgress(){
+  try { const p=JSON.parse(localStorage.getItem(bgProgKey())); if(p&&p.completed) return p; } catch {}
+  // one-time migration from the old device-global key so existing users keep unlocks
+  try { const legacy=JSON.parse(localStorage.getItem(BG_PROG_KEY)); if(legacy&&legacy.completed) return legacy; } catch {}
+  return {completed:{}};
+}
+function bgSaveProgress(p){ try{ localStorage.setItem(bgProgKey(), JSON.stringify(p)); }catch{} }
+// Fold cloud per-level bests into local progress: a recorded score on level k
+// means it was cleared on some device, so mark it complete → unlocks level k+1.
+function bgMergeCloudUnlocks(){
+  const p = bgLoadProgress(); let changed = false;
+  for (const k of Object.keys(cloudBests)) {
+    const n = +k; if (n>=1 && !p.completed[n]) { p.completed[n] = true; changed = true; }
+  }
+  if (changed) bgSaveProgress(p);
+}
 function bgIsUnlocked(k){ if(k<=1) return true; return !!bgLoadProgress().completed[k-1]; }   // unlock once the previous level is finished
 function bgTurtleLevel(){ const order=[1,2,3,4,5]; let t=1; for(const k of order){ if(bgIsUnlocked(k)) t=k; } return t; }   // turtle sits on the furthest unlocked level
 function bgMarkComplete(k, mastered){                                                         // returns the level number that JUST unlocked, else 0
@@ -3841,9 +3941,17 @@ function drawFly(W,H,cx,cy,RR,k,F,playing){
 
 function bgShow(phase){
   BG.phase = phase;
-  const full = { connect:'bg-connect', setup:'bg-setup', menu:'bg-menu', instr:'bg-instr', result:'bg-result' };
-  ['bg-connect','bg-setup','bg-menu','bg-instr','bg-result'].forEach(id => { const el=$(id); if(el) el.style.display='none'; });
+  const full = { connect:'bg-connect', loading:'bg-loading', menu:'bg-menu', instr:'bg-instr', result:'bg-result' };
+  ['bg-connect','bg-loading','bg-menu','bg-instr','bg-result'].forEach(id => { const el=$(id); if(el) el.style.display='none'; });
   if(full[phase]) $(full[phase]).style.display='flex';
+  if(phase==='result' && $('bg-r-sync')){
+    // Reassure the player their score is kept with the board (recorded to the
+    // cloud on every finish via bgSaveBest→cloudRecordSession) and will be there
+    // on any device. Only claim cloud saving when a board is actually identified.
+    $('bg-r-sync').innerHTML = boardId
+      ? '<span class="bg-synced">☁ Saved to your board</span> — your scores are here on any device.'
+      : '';
+  }
   $('bg-play-bar').style.display  = phase==='play'  ? 'flex' : 'none';
   // FLIGHT options toggle: shown on the FLIGHT level; opening it asks for the
   // settings password (see the bg-fly-opts-btn handler).
@@ -4477,6 +4585,14 @@ function bgRenderMenu(){
     const el = wrap.querySelector(`.bg-circle[data-k="${k}"]`);
     if(el) el.addEventListener('click', ()=>{ BG.level=k; bgGoInstr(); });
   }});
+  // Synced indicator: reassure the player their bests belong to this board and
+  // travel with it. Only claim "synced" once the cloud fetch actually succeeded.
+  const synced=$('bg-menu-synced');
+  if(synced){
+    synced.innerHTML = !boardId ? ''
+      : cloudBestsOK ? `<span class="bg-synced">☁ Scores synced to this board</span> — they follow it to any device.`
+      : `Your scores are saved to this board and follow it to any device.`;
+  }
 }
 function bgGoInstr(){
   const L=BG_LEVELS[BG.level];
@@ -4501,41 +4617,44 @@ function bgStartCountdown(){
 function bgnrSetConnected(yes){
   if($('bg-conn-dot')) $('bg-conn-dot').className='bt-dot'+(yes?' on':'');
   if($('bg-conn-text')) $('bg-conn-text').textContent = yes?'connected':'disconnected';
-  if(!yes){ setCalHealth(0); bgStopRangePoll(); }   // clear warning + stop auto-retry on drop
+  if(!yes){ setCalHealth(0); }   // clear the calibration-drift banner on drop
   if(yes) bgApplyFilter();   // board may have rebooted to defaults — restore the chosen mode/Kp
 }
-// While on the setup screen with no saved range, silently re-read the board's
-// range every few seconds so that as soon as the user saves it in the testing
-// dashboard (another tab) we advance to the menu on our own — no button to press.
-let bgRangePoll = null;
-function bgStopRangePoll(){ if(bgRangePoll){ clearInterval(bgRangePoll); bgRangePoll = null; } }
-function bgStartRangePoll(){
-  bgStopRangePoll();
-  bgRangePoll = setInterval(async () => {
-    if(!connected){ bgStopRangePoll(); return; }
-    const c = await bgReadBoardCalib();
-    if(c){ BG.calib = c; bgStopRangePoll(); bgShow('menu'); bgRenderMenu(); }
-  }, 3000);
-}
+// A board with no saved range still needs to be immediately playable — the
+// player should never see a calibration/setup gate. We use a neutral, symmetric
+// default (±EDGE_DEG° of pitch about the current zero); if a real range gets
+// saved on the board later, the next connect picks it up automatically.
+const BG_DEFAULT_CALIB = { axis:'pitch', sign:1, center:0, reach:EDGE_DEG, front:EDGE_DEG, back:-EDGE_DEG, isDefault:true };
+function bgSetLoadingMsg(t){ const el=$('bg-loading-msg'); if(el) el.textContent=t; }
 async function bgnrOnConnect(){
   // Range lives on the board — read it fresh on every connect so a board
   // recalibrated in the testing dashboard is picked up without reloading.
-  BG.calib = await bgReadBoardCalib();
-  if(BG.calib){
-    bgStopRangePoll();
-    log(`Range from board: fwd ${BG.calib.front.toFixed(0)}° back ${BG.calib.back.toFixed(0)}° (reach ±${BG.calib.reach.toFixed(0)}°).`, 'ok');
-    bgShow('menu'); bgRenderMenu();
+  const c = await bgReadBoardCalib();
+  if(c){
+    BG.calib = c;
+    log(`Range from board: fwd ${c.front.toFixed(0)}° back ${c.back.toFixed(0)}° (reach ±${c.reach.toFixed(0)}°).`, 'ok');
   } else {
-    // No range yet — show the one-time setup hint and auto-advance when it appears.
-    bgShow('setup');
-    bgStartRangePoll();
+    // No saved range — fall back to a sensible default so play starts right away.
+    BG.calib = Object.assign({}, BG_DEFAULT_CALIB);
+    log('No saved range on board — using a default forward/back range.', 'warn');
   }
+  bgShow('menu'); bgRenderMenu();
 }
 function bgnrConnectFailed(e){
-  const disc = /disconnect/i.test(e && e.message || '');
-  $('bg-connect-hint').innerHTML = disc
-    ? 'Could not connect. The board allows <strong>one connection at a time</strong> — close any other tab/device using it (e.g. the testing dashboard), power-cycle the board, then try again.'
-    : 'Connect failed: ' + (e && e.message || e);
+  const msg  = (e && e.message) || String(e || '');
+  const hint = $('bg-connect-hint'); if(!hint) return;
+  // The user simply closed the device chooser — not an error, just re-prompt.
+  if (e && (e.name === 'NotFoundError' || /cancell?ed|user cancelled/i.test(msg))) {
+    hint.textContent = 'No board selected. Tap Connect and pick your board from the list.';
+    return;
+  }
+  // Board already in use elsewhere — it only allows one connection at a time.
+  if (/disconnect|GATT operation|already in progress|in use/i.test(msg)) {
+    hint.innerHTML = 'Couldn’t connect — your board is likely still connected somewhere else. '
+      + 'Close any other tab or app using it, switch the board off and on, then tap Connect.';
+    return;
+  }
+  hint.textContent = 'Couldn’t connect. Make sure the board is switched on and nearby, then try again.';
 }
 
 // ── Sensor-filter control (Advanced drawer) → board MODE/KP commands ─────────
@@ -4666,6 +4785,9 @@ function buildFlyParams(){
 drawTiltPlot(0, 0);
 if (BEGINNER) bgnrInit();
 else log('Open ⚙ Advanced for board controls, diagnostics and the instrument view.');
+// Returning player: try to silently reconnect to the last board (no chooser).
+// Best-effort and non-blocking; leaves the Connect screen up if it can't.
+tryAutoReconnect();
 </script>
 
 </body>
