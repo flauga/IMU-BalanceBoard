@@ -45,6 +45,7 @@ private:
     bool        _hasCentral       = false;
     uint8_t     _connectionHandle = 0xFF;
     bool        _notifyEnabled    = false;
+    bool        _reqFastPending   = false;   // a fast-interval re-request is outstanding (anti ping-pong)
     bool*       _streaming        = nullptr;
     SerialCommand* _serial        = nullptr;
 

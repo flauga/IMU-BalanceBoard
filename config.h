@@ -28,6 +28,18 @@ static constexpr uint32_t SERIAL_BAUD_RATE         = 115200;
 // and the dot stutters less. The browser does render-side smoothing on top.
 static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 11;   // ~90 Hz output rate
 
+// Hard CAP on how slow the board is ever allowed to emit frames. The board used
+// to retune its emit cadence to WHATEVER connection interval the central granted
+// (see sl_bt_evt_connection_parameters). Windows/Chrome and phones aggressively
+// downshift the interval for power saving — sometimes to hundreds of ms or more —
+// and the board would obediently drop to a few Hz (or ~1 Hz), producing the
+// recurring "board moves, dot freezes for ~1 s, then snaps" bug. The sensor loop
+// never stalled; the board just stopped OFFERING fresh frames. We now clamp the
+// emit interval to this ceiling so the board ALWAYS has a fresh sample ready each
+// connection event, no matter how slowly the central polls — the radio carries
+// the latest frame per event instead of the board self-throttling to 1 Hz.
+static constexpr uint32_t OUTPUT_INTERVAL_MAX_MS = 20;     // never slower than 50 Hz
+
 // --- BLE ---
 // 16-byte custom UUIDs for the IMU service and its two characteristics.
 // These are random base UUIDs — match them in your Web Bluetooth client.
@@ -54,7 +66,13 @@ static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 11;   // ~90 Hz output rate
 static constexpr uint16_t BLE_CONN_INTERVAL_MIN = 12;   // 15 ms
 static constexpr uint16_t BLE_CONN_INTERVAL_MAX = 12;   // 15 ms (pinned, no band)
 static constexpr uint16_t BLE_CONN_LATENCY      = 0;    // never skip an event
-static constexpr uint16_t BLE_CONN_TIMEOUT      = 100;  // x10 ms = 1000 ms supervision
+// Supervision timeout was 100 (1000 ms). That's exactly the "solid 1-second gap"
+// window: a brief RF/OS scheduling hiccup that stalls events for ~1 s would trip
+// the timeout, drop the link, and force a reconnect (~1 s of no data → freeze,
+// then snap). Raised to 400 (4000 ms) so a transient stall RIDES THROUGH instead
+// of tearing the connection down. Rule: timeout_ms > (1+latency)*max_interval_ms*2;
+// easily satisfied. Latency stays 0 so we still never intentionally skip events.
+static constexpr uint16_t BLE_CONN_TIMEOUT      = 400;  // x10 ms = 4000 ms supervision
 static constexpr uint16_t BLE_CONN_CE_MIN       = 0;    // don't care
 static constexpr uint16_t BLE_CONN_CE_MAX       = 0;    // don't care
 

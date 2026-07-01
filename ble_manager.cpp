@@ -149,6 +149,7 @@ void BleManager::onBgapiEvent(void* evtPtr) {
         case sl_bt_evt_connection_opened_id: {
             _hasCentral       = true;
             _connectionHandle = evt->data.evt_connection_opened.connection;
+            _reqFastPending   = false;
             Serial.println("[BLE] central connected");
             // Request a fast connection interval (~15 ms). The board produces a
             // notify every SERIAL_PRINT_INTERVAL_MS, but the radio only sends one
@@ -171,8 +172,9 @@ void BleManager::onBgapiEvent(void* evtPtr) {
             break;
         }
         case sl_bt_evt_connection_closed_id: {
-            _hasCentral    = false;
-            _notifyEnabled = false;
+            _hasCentral     = false;
+            _notifyEnabled  = false;
+            _reqFastPending = false;
             Serial.println("[BLE] central disconnected — re-advertising");
             _startAdvertising();
             break;
@@ -187,8 +189,34 @@ void BleManager::onBgapiEvent(void* evtPtr) {
             Serial.printf("[BLE] conn params interval=%u (%lums) latency=%u timeout=%u\n",
                           (unsigned)p.interval, (unsigned long)interval_ms,
                           (unsigned)p.latency, (unsigned)p.timeout);
-            // Clamp to a sane floor so a tiny granted interval can't flood the loop.
-            if (_serial && interval_ms >= 8) _serial->setPrintIntervalMs(interval_ms);
+            // Retune the emit cadence toward the granted interval so ideally one
+            // fresh frame lands per connection event — BUT clamp to a floor AND a
+            // ceiling. The ceiling (OUTPUT_INTERVAL_MAX_MS) is the important one:
+            // when the central downshifts to a slow power-saving interval, the
+            // board must NOT slow its emit rate to match (that was the recurring
+            // ~1-second-freeze bug). It keeps offering fresh frames at >=50 Hz;
+            // the radio just carries the latest one per (slow) event.
+            uint32_t emit_ms = interval_ms;
+            if (emit_ms < 8)                        emit_ms = 8;                    // floor: don't flood the loop
+            if (emit_ms > OUTPUT_INTERVAL_MAX_MS)   emit_ms = OUTPUT_INTERVAL_MAX_MS; // ceiling: never self-throttle
+            if (_serial) _serial->setPrintIntervalMs(emit_ms);
+            // If the central downshifted us to a slow interval (power saving), nudge
+            // it back toward fast ONCE per downshift. Guard with _reqFastPending so a
+            // central that simply refuses our request can't trigger an infinite
+            // request/grant ping-pong. Cleared when the granted interval is fast.
+            if (interval_ms > (OUTPUT_INTERVAL_MAX_MS + 5)) {
+                if (!_reqFastPending) {
+                    _reqFastPending = true;
+                    sl_bt_connection_set_parameters(
+                        _connectionHandle,
+                        BLE_CONN_INTERVAL_MIN, BLE_CONN_INTERVAL_MAX,
+                        BLE_CONN_LATENCY, BLE_CONN_TIMEOUT,
+                        BLE_CONN_CE_MIN, BLE_CONN_CE_MAX);
+                    Serial.println("[BLE] interval slow — re-requesting fast params");
+                }
+            } else {
+                _reqFastPending = false;                 // back to fast; allow a future re-request
+            }
             break;
         }
         case sl_bt_evt_gatt_server_attribute_value_id: {

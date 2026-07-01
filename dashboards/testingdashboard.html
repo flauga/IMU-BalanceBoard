@@ -723,6 +723,7 @@ let dispRoll = 0, dispPitch = 0;
 // source by the 15 ms connection interval, so the easing was mostly pure input lag
 // (~39 ms at 0.35 vs ~10 ms at 0.8). Tiles/chart/CSV stay RAW; this is the dot only.
 let DOT_SMOOTH = (() => { const v = parseFloat(localStorage.getItem('td_dotsmooth_v2')); return (v>=0.05 && v<=1) ? v : 0.8; })();
+let rafPrevTs = performance.now();   // for frame-rate-independent dot smoothing
 
 function onAngles(evt) {
   const dv = evt.target.value;
@@ -1170,7 +1171,15 @@ function pushChartPoint(elapsed, roll, pitch) {
 
   // Ease the DOT toward the latest raw value (tiles/chart/CSV remain raw above).
   // At DOT_SMOOTH=1 this is identity. Turns BLE burst-then-stall into a glide.
-  const a = DOT_SMOOTH;
+  // Frame-rate independent (same math as steadysteps): DOT_SMOOTH is the intended
+  // easing per 60 Hz frame, rescaled to the actual frame time so lag is identical
+  // regardless of fps and matches the game's feel at the same setting.
+  const nowRaf = performance.now();
+  let dtRaf = (nowRaf - rafPrevTs) / (1000 / 60);
+  rafPrevTs = nowRaf;
+  if (!(dtRaf > 0)) dtRaf = 1;
+  if (dtRaf > 4)    dtRaf = 4;
+  const a = DOT_SMOOTH >= 1 ? 1 : 1 - Math.pow(1 - DOT_SMOOTH, dtRaf);
   dispRoll  += (lastRoll  - dispRoll ) * a;
   dispPitch += (lastPitch - dispPitch) * a;
 
