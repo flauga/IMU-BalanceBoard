@@ -189,15 +189,24 @@ void BleManager::onBgapiEvent(void* evtPtr) {
             Serial.printf("[BLE] conn params interval=%u (%lums) latency=%u timeout=%u\n",
                           (unsigned)p.interval, (unsigned long)interval_ms,
                           (unsigned)p.latency, (unsigned)p.timeout);
-            // Retune the emit cadence toward the granted interval so ideally one
-            // fresh frame lands per connection event — BUT clamp to a floor AND a
-            // ceiling. The ceiling (OUTPUT_INTERVAL_MAX_MS) is the important one:
+            // Retune the emit cadence to HALF the granted interval (2 fresh
+            // frames per connection event), clamped to a floor AND a ceiling.
+            //
+            // Half, not equal: emit == interval was the last hidden lag source.
+            // The millis-based emit timer and the radio's connection-event clock
+            // free-run at the same period but are not phase-locked, so the queued
+            // frame's wait for its event slowly swept 0 → interval → 0 as the
+            // clocks drifted — the dot lag "breathed" by up to a full interval
+            // for seconds at a time. At 2× the event rate the newest queued frame
+            // is never more than ~half an interval stale, regardless of phase.
+            //
+            // The ceiling (OUTPUT_INTERVAL_MAX_MS) is still the important guard:
             // when the central downshifts to a slow power-saving interval, the
             // board must NOT slow its emit rate to match (that was the recurring
             // ~1-second-freeze bug). It keeps offering fresh frames at >=50 Hz;
-            // the radio just carries the latest one per (slow) event.
-            uint32_t emit_ms = interval_ms;
-            if (emit_ms < 8)                        emit_ms = 8;                    // floor: don't flood the loop
+            // the radio just carries the latest ones per (slow) event.
+            uint32_t emit_ms = interval_ms / 2;
+            if (emit_ms < 5)                        emit_ms = 5;                    // floor ≈ the 208 Hz sample period
             if (emit_ms > OUTPUT_INTERVAL_MAX_MS)   emit_ms = OUTPUT_INTERVAL_MAX_MS; // ceiling: never self-throttle
             if (_serial) _serial->setPrintIntervalMs(emit_ms);
             // If the central downshifted us to a slow interval (power saving), nudge
@@ -384,7 +393,7 @@ void BleManager::_handleCommandWrite(const uint8_t* data, uint8_t len) {
         if (_serial) _serial->setPrintIntervalMs(1000 / (uint32_t)hz);
         Serial.printf("[CMD] Output rate set to %d Hz\n", hz);
     } else if (dispatchTuningCommand(cmd)) {
-        // MODE/KP/VAR/EMA/LIMIT/LIMITCLEAR/SAVE — handled in the shared dispatcher.
+        // MODE/KP/VAR/EMA/LIMIT/LIMITCLEAR/SAVE/GYROCAL/SERIAL — shared dispatcher.
     } else {
         Serial.printf("[CMD] Unknown BLE command: '%s'\n", cmd);
     }

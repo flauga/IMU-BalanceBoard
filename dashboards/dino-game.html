@@ -561,7 +561,8 @@ function renderMeter(){
 
 /* ───────────────────────────── Dino game ──────────────────────────────────
    Self-contained endless runner; procedural canvas (offline / file://).      */
-const cv = $('game'), ctx = cv.getContext('2d');
+// desynchronized: lower-latency canvas presentation where supported.
+const cv = $('game'), ctx = cv.getContext('2d', { desynchronized: true });
 const W = cv.width, H = cv.height;
 const GROUND = H - 48;             // feet + obstacle bottoms rest here
 const DUCK_H = 26;

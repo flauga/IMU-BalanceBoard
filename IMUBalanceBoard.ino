@@ -380,6 +380,19 @@ int buildTuningSnapshot(char* out, int cap) {
     return (int)(p - out);
 }
 
+// ── On-demand gyro recalibration (GYROCAL) ──────────────────────────────────
+// SteadySteps' filter panel offers a "fix drift" button that sends GYROCAL.
+// The command may arrive on the BLE-host task, which must never block — so the
+// handler only sets this flag; loop() performs the actual ~800 ms calibration
+// (board must be held still, same as the boot-time pass). Streaming pauses for
+// that window, then resumes with the fresh bias.
+static volatile bool g_gyrocal_pending = false;
+
+void requestGyroCal() {
+    g_gyrocal_pending = true;
+    Serial.println("[CMD] Gyro recalibration queued — keep the board still");
+}
+
 void setDriftLog(bool on) {
     g_drift_log = on;
     Serial.printf("[CMD] Drift log %s\n", on ? "ON" : "OFF");
@@ -555,6 +568,24 @@ void setup() {
 }
 
 void loop() {
+    // 0. Deferred gyro recalibration (GYROCAL command). Runs here — never on
+    //    the BLE-host task — because it blocks ~800 ms sampling the still
+    //    board. The BLE stack keeps servicing the link meanwhile (4 s
+    //    supervision timeout gives plenty of margin).
+    if (g_gyrocal_pending) {
+        g_gyrocal_pending = false;
+        Serial.println("[CMD] Recalibrating gyro — keep the board still...");
+        if (g_imu.calibrateGyro()) {
+            // Fresh driver bias supersedes the integral correction accumulated
+            // against the old one — clear it so it can't re-introduce drift.
+            g_mahony.resetBias();
+            Serial.println("[CMD] Gyro recalibrated");
+        } else {
+            Serial.println("[CMD] Gyro recalibration failed (board moving?) — kept previous bias");
+        }
+        g_imu.resetWatchdog();
+    }
+
     // 1. Drain IMU as fast as possible — the 208 Hz ODR means a new sample
     //    every ~4.8 ms, so this just runs whenever data is available.
     pollSensor();

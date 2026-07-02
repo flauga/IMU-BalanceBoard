@@ -1046,7 +1046,10 @@ function onAngles(evt) {
 // drawImage + dynamic layers (ring, trail, dot, particles, popups, HUD).
 // ───────────────────────────────────────────────────────────────────────────
 const tiltCanvas = $('tiltCanvas');
-const tiltCtx    = tiltCanvas.getContext('2d');
+// desynchronized: let Chrome present the canvas outside the DOM-compositor
+// queue where supported — shaves up to a frame (~17 ms) of display latency
+// for the dot. Ignored (harmlessly) where unsupported.
+const tiltCtx    = tiltCanvas.getContext('2d', { desynchronized: true });
 const maxAngle   = 30;   // locked — plot scale is always ±30°
 
 const staticCanvas = document.createElement('canvas');

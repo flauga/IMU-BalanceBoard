@@ -24,6 +24,13 @@ public:
     float getBiasY() const { return by_; }
     float getBiasZ() const { return bz_; }
 
+    // Zero the integral bias WITHOUT touching the quaternion. Called after an
+    // on-demand gyro recalibration (GYROCAL): the driver's new bias estimate
+    // supersedes whatever the integral term had accumulated against the old
+    // one, and with Ki tiny the stale correction would otherwise take minutes
+    // to bleed off (showing up as fresh drift right after a recal).
+    void resetBias() { bx_ = by_ = bz_ = 0.0f; }
+
     // Effective trust factor (0..1) of the most recent accel sample.
     // Updated each call to update(); used by diagnostic logs.
     float getLastTrust() const { return last_trust_; }

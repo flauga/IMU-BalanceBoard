@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // --- Firmware version ---
-#define FIRMWARE_VERSION "4.0-mg24"
+#define FIRMWARE_VERSION "4.1-mg24"
 
 // --- I2C / IMU pin Assignments ---
 // On the Seeed XIAO MG24 Sense the built-in LSM6DS3TR-C is wired to the
@@ -22,11 +22,21 @@ static constexpr uint32_t IMU_INIT_RETRY_DELAY_MS = 500;
 // default and reliable everywhere. The per-frame text print is rate-divided
 // so this is still well within budget.
 static constexpr uint32_t SERIAL_BAUD_RATE         = 115200;
-// Output cadence for BLE notifies (and the rate-divided serial print). Raised
-// from 20 ms (50 Hz) to 11 ms (~90 Hz): smaller, more frequent notifies mean the
-// OS BLE stack batches fewer frames per burst, so the browser sees fresher data
-// and the dot stutters less. The browser does render-side smoothing on top.
-static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 11;   // ~90 Hz output rate
+// Output cadence for BLE notifies (and the rate-divided serial print). This is
+// only the PRE-NEGOTIATION default: once the central grants a connection
+// interval, ble_manager retunes the cadence to HALF that interval (see the
+// sl_bt_evt_connection_parameters handler). 7 ms ≈ half of the 15 ms interval
+// most centrals grant, so the default already matches the post-negotiation rate.
+//
+// Why half, not equal (the old scheme): the emit timer (millis) and the radio's
+// connection-event clock free-run at the same period but are NOT phase-locked.
+// With emit == interval the queued frame's wait for the next connection event
+// slowly sweeps 0 → 15 ms → 0 as the clocks drift past each other, so the dot
+// lag visibly "breathes" — fine for a while, then ~a full interval of extra lag
+// for many seconds. Emitting at 2× the event rate bounds the staleness of the
+// newest queued frame to ~half an interval, always. The radio happily carries
+// two 16-byte notifies per event; the browser drains both and keeps the latest.
+static constexpr uint32_t SERIAL_PRINT_INTERVAL_MS = 7;    // ~143 Hz offer rate
 
 // Hard CAP on how slow the board is ever allowed to emit frames. The board used
 // to retune its emit cadence to WHATEVER connection interval the central granted
@@ -59,12 +69,18 @@ static constexpr uint32_t OUTPUT_INTERVAL_MAX_MS = 20;     // never slower than 
 //
 // All values are integers (uint16_t) — deliberately no floats: this is requested
 // from the BLE-host task, whose small stack the float-printf path overflows.
-//   interval: units 1.25 ms (12 => 15 ms; floor 6 => 7.5 ms, but Windows clamps higher)
+//   interval: units 1.25 ms (6 => 7.5 ms, 12 => 15 ms)
 //   latency : intervals the peripheral may skip — MUST be 0, we always have data
 //   timeout : units 10 ms; rule: timeout_ms > (1 + latency) * max_interval_ms * 2
 //   ce_len  : connection-event length, units 0.625 ms; 0 = let the stack decide
-static constexpr uint16_t BLE_CONN_INTERVAL_MIN = 12;   // 15 ms
-static constexpr uint16_t BLE_CONN_INTERVAL_MAX = 12;   // 15 ms (pinned, no band)
+//
+// The request is a RANGE the central picks from. Min was previously pinned to 12
+// (15 ms) — that told fast centrals (Android, many macOS/Linux stacks) not to go
+// below 15 ms even though they support the BLE floor of 7.5 ms. Offering 6..12
+// lets those grant 7.5 ms (halving the interval share of the lag budget) while
+// Windows, which won't go below ~15 ms, still picks 12 exactly as before.
+static constexpr uint16_t BLE_CONN_INTERVAL_MIN = 6;    // 7.5 ms (BLE spec floor)
+static constexpr uint16_t BLE_CONN_INTERVAL_MAX = 12;   // 15 ms
 static constexpr uint16_t BLE_CONN_LATENCY      = 0;    // never skip an event
 // Supervision timeout was 100 (1000 ms). That's exactly the "solid 1-second gap"
 // window: a brief RF/OS scheduling hiccup that stalls events for ~1 s would trip

@@ -275,6 +275,9 @@ The command characteristic accepts the same text commands as the UART:
 | `KP <value>` | Mahony accel gain (fusion mode); higher = faster re-level |
 | `VAR <g²>` | Motion-variance gate; higher = accel keeps correcting during motion (less lag) |
 | `EMA <alpha>` | Output smoothing 0.01–1.0; higher = less smoothing lag |
+| `GYROCAL` | Re-average the gyro bias (~1 s, board must be flat & still; streaming pauses). Queued to the main loop — never blocks the BLE task |
+| `SERIAL ON` / `SERIAL OFF` | Toggle per-frame angle prints on the UART |
+| `SERIAL DIV <n>` | Print 1 of every n frames on the UART |
 
 The full UART command set — including `SAVE`, `LIMIT …` and `LIMITCLEAR` — is
 also accepted over BLE, so the board can be fully driven from a Web-Bluetooth
@@ -303,6 +306,7 @@ Identical to the ESP32 firmware:
 | `LIMIT <FRONT\|BACK\|LEFT\|RIGHT>` | Capture the current tilt as that range limit |
 | `LIMITCLEAR` | Forget the captured tilt limits |
 | `DEBUG ON` / `DEBUG OFF` | Toggle 1 Hz drift-diagnostic log |
+| `GYROCAL` | Re-average the gyro bias (~1 s, board flat & still; streaming pauses briefly) |
 | `SERIAL ON` / `SERIAL OFF` | Toggle per-frame angle prints on the UART |
 | `SERIAL DIV <n>` | Print 1 of every n frames (default 5 = ~10 Hz UART) |
 | `MODE <fusion\|gyro\|accel>` | Orientation filter source (default fusion) |
@@ -329,10 +333,111 @@ Once per second a diagnostic line is also printed:
 
 | Field | Meaning |
 |---|---|
-| `tx` | BLE notifications sent in the last second (expected ≈ 50) |
+| `tx` | BLE notifications sent in the last second. The emit rate is retuned to **half the granted connection interval** — expect ≈ 130–145 at a 15 ms interval, ≈ 260 at 7.5 ms; ≈ 50 only if the ceiling clamp (`OUTPUT_INTERVAL_MAX_MS`) is active on a slow link |
 | `samples` | IMU samples published by the sensor loop (expected ≈ 190–200) |
-| `maxGap` | Worst inter-send gap in ms (expected ≈ 21; spikes flag stalls) |
+| `maxGap` | Worst inter-send gap in ms (expected ≈ emit interval + a few ms; sustained spikes flag stalls) |
 | `clients` | Number of connected BLE centrals (0 or 1) |
+
+---
+
+## Dot lag — root-cause findings & fix history
+
+The recurring complaint: the on-screen dot trails the physical board, sometimes
+badly, sometimes barely. It has had **four distinct root causes**, fixed in
+order. This section is the complete record so nobody re-diagnoses from scratch.
+
+### The latency budget (where the milliseconds actually go)
+
+Every stage between the board moving and the dot moving, with its typical cost
+after all fixes:
+
+| # | Stage | Typical cost | Notes |
+|---|---|---|---|
+| 1 | IMU sampling (208 Hz ODR) | 0–4.8 ms (avg ~2.4) | LSM6DS3, fixed |
+| 2 | Sensor anti-alias LPF (100 Hz BW) | ~2 ms group delay | fixed |
+| 3 | Mahony fusion | ~0 ms | gyro-integrated — no lag for motion; Kp/VAR only affect settle accuracy |
+| 4 | Firmware EMA (`EMA`, default 0.6 @ 208 Hz) | ~3 ms (α 0.6) / ~9 ms (α 0.35) | lever: `EMA` slider; runs at sample rate so it's cheap lag-wise |
+| 5 | Wait for a BLE **connection event** | ≤ ½ conn interval (~4–8 ms) | see fix #4 below — used to be up to a *full* interval, phase-drifting |
+| 6 | Conn interval itself | 7.5 ms (fast centrals) / 15 ms (Windows) | firmware requests 6–12 × 1.25 ms; Windows won't go below ~15 ms |
+| 7 | OS BLE stack → browser JS event | ~5–20 ms | platform-dependent, not tunable |
+| 8 | Browser rAF wait | 0–16.7 ms (avg ~8) | frame drawn on next vsync tick |
+| 9 | Render-side dot smoothing (α 0.8 / 60 Hz frame) | ~4 ms | lever: smoothing slider; 1.0 = off |
+| 10 | Canvas → compositor → display | ~17–33 ms | `desynchronized: true` canvas hint shaves up to one frame on supported Chrome |
+
+**Total, typical: ~55–85 ms motion-to-photon.** Roughly half of that
+(stages 7 + 8 + 10) is OS/browser/display plumbing that no firmware change can
+remove. Anything visibly worse than ~100 ms means one of the pathologies below
+has come back — use the **Link & latency** panel in the testing dashboard to
+identify which.
+
+### Fix history (each a different bug, all shipped)
+
+1. **BLE notify batching** — the board fired notifies at 50 Hz but never asked
+   for a fast connection interval, so Windows/Chrome defaulted to ~30–50 ms and
+   several frames queued up and arrived in one burst: dot freezes, then snaps.
+   *Fix:* request a fast interval on connect (`sl_bt_connection_set_parameters`).
+
+2. **Firmware self-throttling** (the "solid 1-second freeze") — the board
+   retuned its emit cadence to *whatever* interval the central granted. When the
+   OS downshifted to a slow power-saving interval (hundreds of ms), the board
+   obediently emitted at a few Hz. Compounded by a 1000 ms supervision timeout
+   that tore the link down on any ~1 s RF stall. *Fix:* `OUTPUT_INTERVAL_MAX_MS`
+   caps the emit interval at 20 ms (≥ 50 Hz always offered), supervision timeout
+   raised to 4 s, and a guarded re-request nudges the interval back up after a
+   downshift.
+
+3. **Heavy render-side smoothing** — the dashboards' dot easing (α 0.35,
+   frame-rate-dependent) was hiding the batching *and adding ~40 ms of its own
+   lag*, more at low fps. *Fix:* frame-rate-independent easing, default α 0.8
+   (~4 ms), tunable slider, and the underlying batching fixed at source.
+
+4. **Emit/connection-event phase beat** (found in this pass — the "still lags
+   sometimes" residue). The emit timer was set *equal* to the granted connection
+   interval (15 ms emit, 15 ms events) on the theory of "one fresh frame per
+   event". But the two clocks free-run: they're the same period and **not
+   phase-locked**, so the queued frame's wait for its connection event slowly
+   swept 0 → 15 → 0 ms as the clocks drifted past each other. The dot lag
+   visibly *breathed* — fine for a stretch, then up to a full interval of extra
+   lag for many seconds. *Fix:* emit at **half** the granted interval (2 frames
+   per event, floor 5 ms, ceiling unchanged). The newest frame at any event is
+   now never more than ~half an interval stale, regardless of phase. The radio
+   trivially carries two 16-byte notifies per event; the browser drains both and
+   renders the latest. Also in this pass: the connection-interval request now
+   offers a 6–12 range (7.5–15 ms) instead of pinning 15 ms, so Android/macOS
+   centrals that support the BLE floor grant 7.5 ms and halve stage 6.
+
+### Things that were suspected and ruled out
+
+- **The sensor loop stalling** — `[STATS] samples=…` stays ~190–200/s
+  throughout every freeze ever logged; the pipeline upstream of the radio never
+  starved.
+- **UART printing blocking the loop** — the per-frame print is rate-divided
+  (default 1-in-5) and ~500 chars/s at 115200 baud is < 5 % of the UART budget.
+  It can now be disabled over BLE anyway (`SERIAL OFF`, testing-dashboard
+  toggle) to reclaim the headroom while measuring.
+- **Mahony tuning** — Kp/VAR change *settling* behaviour (how fast the estimate
+  re-levels after motion stops), not transport latency. Don't chase lag with
+  the Kp slider; chase it with the Link & latency panel.
+
+### How to measure (testing dashboard → Link & latency)
+
+- **Frame age** — staleness of the newest frame at the moment it's drawn. This
+  *is* the data-side share of the perceived lag. Healthy: < 20 ms.
+- **Conn interval (est.)** — median inter-notification gap ≈ what the central
+  actually granted. 7–8 ms (fast centrals) or ~15 ms (Windows) is right;
+  30 ms+ means the OS downshifted and the firmware's re-request isn't being
+  honoured.
+- **Arrival gap max / Bursts %** — spikes ≫ the median mean OS-side batching.
+- **Queue / Draw loop** — a backed-up queue with a low rAF Hz means the browser
+  tab is render-bound (close the time-series chart tab overlays, check for
+  background throttling), not the link.
+- **Verdict** — the same heuristic SteadySteps' Advanced panel uses, so numbers
+  are comparable across both pages.
+
+Remaining levers, in order of bang-for-buck: keep the render smoothing slider
+high (0.8–1.0), keep `EMA` ≥ 0.6 (the "Responsive" preset), and prefer a
+platform that grants 7.5 ms intervals. Below that you're into OS/display
+territory (~40 ms floor) that no code in this repo can touch.
 
 ---
 

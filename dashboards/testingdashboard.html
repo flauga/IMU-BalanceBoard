@@ -273,6 +273,32 @@ button:disabled { opacity: .3; cursor: not-allowed; }
 </div>
 
 <div class="card">
+  <div class="card-title">Link &amp; latency</div>
+  <div class="session-stats">
+    <div class="ss-item"><div class="ss-label">Frames in</div>    <div class="ss-val" id="d-hz">–</div>    <div class="ss-unit">Hz received</div></div>
+    <div class="ss-item"><div class="ss-label">Arrival gap</div>  <div class="ss-val" id="d-gap">–</div>   <div class="ss-unit">ms avg / max</div></div>
+    <div class="ss-item"><div class="ss-label">Conn interval</div><div class="ss-val" id="d-ci">–</div>    <div class="ss-unit">ms (est. from gaps)</div></div>
+    <div class="ss-item"><div class="ss-label">Queue</div>        <div class="ss-val" id="d-queue">–</div> <div class="ss-unit">frames avg / max</div></div>
+    <div class="ss-item"><div class="ss-label">Frame age</div>    <div class="ss-val" id="d-age">–</div>   <div class="ss-unit">ms at draw</div></div>
+    <div class="ss-item"><div class="ss-label">Draw loop</div>    <div class="ss-val" id="d-raf">–</div>   <div class="ss-unit">Hz rAF</div></div>
+    <div class="ss-item"><div class="ss-label">Bursts</div>       <div class="ss-val" id="d-burst">–</div> <div class="ss-unit">% gaps &gt; 2× median</div></div>
+    <div class="ss-item"><div class="ss-label">Verdict</div>      <div class="ss-val" id="d-verdict" style="font-size:13px;color:var(--text2);">–</div><div class="ss-unit">&nbsp;</div></div>
+  </div>
+  <div class="controls" style="margin-top:10px;align-items:center;gap:12px;flex-wrap:wrap;">
+    <button id="btn-gyrocal" class="btn-amber" disabled>Recalibrate gyro</button>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);cursor:pointer;">
+      <input type="checkbox" id="chk-uart" checked> Board UART print (debug)
+    </label>
+  </div>
+  <div style="font-size:12px;color:var(--text2);margin-top:6px;">
+    Perceived dot lag ≈ frame age + dot smoothing + display (~2 frames). Healthy link: arrival gap ≈ conn
+    interval (7–15&nbsp;ms), queue ≤ 2, age &lt; 20&nbsp;ms. <b>Recalibrate gyro</b> (board flat &amp; still, ~1&nbsp;s;
+    streaming pauses briefly) if the dot creeps while the board rests. UART print off frees a little loop
+    headroom on the board when hunting latency.
+  </div>
+</div>
+
+<div class="card">
   <div class="card-title">Tilt vs time</div>
   <div class="chart-wrap"><canvas id="timeChart"></canvas></div>
 </div>
@@ -336,6 +362,9 @@ function setConnected(yes) {
   $('btn-record').disabled     = !yes;
   $('btn-zero').disabled       = !yes;
   $('btn-save').disabled       = !yes;
+  $('btn-gyrocal').disabled    = !yes;
+  // Fresh link = fresh latency statistics (stale gaps would skew the verdict).
+  diagReset();
   // Stop button is only enabled while recording — handled separately.
   const tb = $('tune-body');
   tb.style.opacity = yes ? '1' : '.4';
@@ -725,6 +754,31 @@ let dispRoll = 0, dispPitch = 0;
 let DOT_SMOOTH = (() => { const v = parseFloat(localStorage.getItem('td_dotsmooth_v2')); return (v>=0.05 && v<=1) ? v : 0.8; })();
 let rafPrevTs = performance.now();   // for frame-rate-independent dot smoothing
 
+// ── Link & latency diagnostics (same instrumentation as SteadySteps' Advanced
+// panel). Splits perceived dot lag into its measurable parts so calibration is
+// evidence-based instead of slider-guessing:
+//   arrival gaps  → is the OS/BLE stack batching frames? (bursty = radio/OS)
+//   est interval  → what connection interval did the central actually grant?
+//   queue depth   → is the rAF loop draining slower than frames arrive?
+//   frame age     → staleness of what's on screen the moment it's drawn — THE
+//                   number that IS the data-side share of the perceived lag.
+const diag = {
+  arrivalGaps: [],     // wall-clock ms between consecutive BLE notifications
+  lastArrival: 0,
+  framesRecv:  0,      // frames received since last readout
+  rafTicks:    0,      // rAF ticks since last readout
+  queueSum:    0,      // sum of pre-drain queue depths (for avg)
+  queueSamples: 0,
+  queueMax:    0,
+  lastFrameAge: 0,     // age (ms) of newest frame at the moment it was drawn
+};
+function diagReset() {
+  diag.arrivalGaps.length = 0;
+  diag.lastArrival = 0; diag.framesRecv = 0; diag.rafTicks = 0;
+  diag.queueSum = 0; diag.queueSamples = 0; diag.queueMax = 0;
+  diag.lastFrameAge = 0;
+}
+
 function onAngles(evt) {
   const dv = evt.target.value;
   if (dv.byteLength < 16) return;
@@ -732,7 +786,15 @@ function onAngles(evt) {
   const roll  = dv.getFloat32(4,  true);
   const pitch = dv.getFloat32(8,  true);
   const yaw   = dv.getFloat32(12, true);
-  PENDING_FRAMES.push({ deviceMs: ms, roll, pitch, yaw });
+  const arrivalMs = performance.now();
+  PENDING_FRAMES.push({ deviceMs: ms, roll, pitch, yaw, arrivalMs });
+
+  if (diag.lastArrival > 0) {
+    diag.arrivalGaps.push(arrivalMs - diag.lastArrival);
+    if (diag.arrivalGaps.length > 300) diag.arrivalGaps.shift();
+  }
+  diag.lastArrival = arrivalMs;
+  diag.framesRecv++;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -740,7 +802,10 @@ function onAngles(evt) {
 // and the current-position dot. Zoom range from ±5° to ±90°.
 // ───────────────────────────────────────────────────────────────────────────
 const tiltCanvas = $('tiltCanvas');
-const tiltCtx    = tiltCanvas.getContext('2d');
+// desynchronized: let Chrome present the canvas outside the DOM-compositor
+// queue where supported — shaves up to a frame (~17 ms) of display latency
+// for the dot. Ignored (harmlessly) where unsupported.
+const tiltCtx    = tiltCanvas.getContext('2d', { desynchronized: true });
 let   maxAngle   = 30;
 
 const TRAIL_LEN  = 600;        // ~9 s at 66 Hz
@@ -1102,6 +1167,17 @@ function pushChartPoint(elapsed, roll, pitch) {
 (function rafLoop() {
   requestAnimationFrame(rafLoop);
 
+  // Diagnostics: count rAF ticks and sample queue depth before draining.
+  diag.rafTicks++;
+  const qDepth = PENDING_FRAMES.length;
+  diag.queueSum += qDepth; diag.queueSamples++;
+  if (qDepth > diag.queueMax) diag.queueMax = qDepth;
+  if (qDepth > 0) {
+    // Age of the newest queued frame at draw time = how stale what we're
+    // about to show is. This is the number that matters for perceived lag.
+    diag.lastFrameAge = performance.now() - PENDING_FRAMES[qDepth - 1].arrivalMs;
+  }
+
   // Drain pending frames in order.
   while (PENDING_FRAMES.length > 0) {
     const f = PENDING_FRAMES.shift();
@@ -1185,6 +1261,90 @@ function pushChartPoint(elapsed, roll, pitch) {
 
   drawTiltPlot(dispRoll, dispPitch);
 })();
+
+// ───────────────────────────────────────────────────────────────────────────
+// Link & latency readout — recompute + render every 500 ms from the rolling
+// arrival/queue stats. Tells us decisively whether dot lag is data-side
+// (BLE batching, queue backup) or render-side.
+// ───────────────────────────────────────────────────────────────────────────
+function diagMedian(arr) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+function diagMean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0; }
+
+let diagLastMs = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  const winS = (now - diagLastMs) / 1000;
+  diagLastMs = now;
+
+  if (!connected || diag.framesRecv === 0) {
+    ['d-hz','d-gap','d-ci','d-queue','d-burst','d-age','d-raf'].forEach(id => $(id).textContent = '–');
+    $('d-verdict').textContent = connected ? 'no data' : 'disconnected';
+    $('d-verdict').style.color = 'var(--text2)';
+    diag.framesRecv = 0; diag.rafTicks = 0;
+    diag.queueSum = 0; diag.queueSamples = 0; diag.queueMax = 0;
+    return;
+  }
+
+  const hz       = diag.framesRecv / winS;
+  const rafHz    = diag.rafTicks   / winS;
+  const gapAvg   = diagMean(diag.arrivalGaps);
+  const gapMax   = diag.arrivalGaps.length ? Math.max(...diag.arrivalGaps) : 0;
+  const gapMed   = diagMedian(diag.arrivalGaps);
+  const qAvg     = diag.queueSamples ? diag.queueSum / diag.queueSamples : 0;
+  const qMax     = diag.queueMax;
+  const burstThr = gapMed * 2;
+  const bursts   = diag.arrivalGaps.filter(g => g > burstThr).length;
+  const burstPct = diag.arrivalGaps.length ? 100 * bursts / diag.arrivalGaps.length : 0;
+
+  $('d-hz')   .textContent = hz.toFixed(0);
+  $('d-gap')  .textContent = `${gapAvg.toFixed(0)} / ${gapMax.toFixed(0)}`;
+  // Median inter-notification gap ≈ the granted connection interval (with the
+  // firmware emitting at 2× the event rate, notifies land 2-per-event, so the
+  // median actually tracks the delivery cadence the OS passes through).
+  $('d-ci')   .textContent = gapMed.toFixed(1);
+  $('d-queue').textContent = `${qAvg.toFixed(1)} / ${qMax}`;
+  $('d-burst').textContent = `${burstPct.toFixed(0)}%`;
+  $('d-age')  .textContent = diag.lastFrameAge.toFixed(0);
+  $('d-raf')  .textContent = rafHz.toFixed(0);
+
+  // Verdict heuristic — same thresholds as the SteadySteps Advanced panel.
+  let verdict, color;
+  if (gapMax > 80 || burstPct > 15) {
+    verdict = 'BLE batching — data arrives in bursts'; color = 'var(--red, #f87171)';
+  } else if (qAvg > 2 || qMax > 6) {
+    verdict = 'Queue backing up — drain/render too slow'; color = 'var(--amber, #f59e0b)';
+  } else if (rafHz < 45) {
+    verdict = 'Low rAF rate — render bound'; color = 'var(--amber, #f59e0b)';
+  } else {
+    verdict = 'Pipeline healthy'; color = 'var(--green, #4ade80)';
+  }
+  $('d-verdict').textContent = verdict;
+  $('d-verdict').style.color = color;
+
+  // Reset per-window counters.
+  diag.framesRecv = 0; diag.rafTicks = 0;
+  diag.queueSum = 0; diag.queueSamples = 0; diag.queueMax = 0;
+}, 500);
+
+// ── Gyro recalibration (GYROCAL, fw ≥ 4.1). Board must be flat & still; the
+// firmware pauses streaming ~1 s while it re-averages the gyro bias.
+$('btn-gyrocal').addEventListener('click', async () => {
+  if (!connected) return;
+  await sendCmd('GYROCAL');
+  log('Gyro recalibration started — keep the board perfectly still. Streaming pauses ~1 s.', 'warn');
+});
+
+// ── Board UART print toggle (SERIAL ON/OFF over BLE, fw ≥ 4.1). Off frees a
+// little main-loop headroom on the board while chasing latency numbers.
+$('chk-uart').addEventListener('change', () => {
+  if (!connected) { $('chk-uart').checked = !$('chk-uart').checked; return; }
+  sendCmd('SERIAL ' + ($('chk-uart').checked ? 'ON' : 'OFF'));
+});
 
 // First paint.
 drawTiltPlot(0, 0);

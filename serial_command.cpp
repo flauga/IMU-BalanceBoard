@@ -22,6 +22,7 @@ extern void setEmaAlpha(float a);
 extern void captureLimit(uint8_t edge);
 extern void clearLimits();
 extern void persistTuning();
+extern void requestGyroCal();
 extern int  buildTuningSnapshot(char* out, int cap);
 
 // LIMIT_* bits mirror the .ino definitions.
@@ -75,6 +76,18 @@ bool dispatchTuningCommand(const char* cmd) {
         clearLimits();                                  return true;
     } else if (strcasecmp(cmd, "SAVE") == 0) {
         persistTuning();                                return true;
+    } else if (strcasecmp(cmd, "GYROCAL") == 0) {
+        // Only queues a flag — the ~800 ms calibration itself runs in loop(),
+        // never on the BLE-host task this may be dispatched from.
+        requestGyroCal();                               return true;
+    } else if (strcasecmp(cmd, "SERIAL ON") == 0) {
+        setSerialPrintEnabled(true);                    return true;
+    } else if (strcasecmp(cmd, "SERIAL OFF") == 0) {
+        setSerialPrintEnabled(false);                   return true;
+    } else if (strncasecmp(cmd, "SERIAL DIV ", 11) == 0) {
+        int div = atoi(cmd + 11);
+        if (div < 1) div = 1;
+        setSerialPrintDivider((uint32_t)div);           return true;
     }
     return false;
 }
@@ -124,16 +137,8 @@ void SerialCommand::processCommand(const char* cmd) {
         setDriftLog(true);
     } else if (strcasecmp(cmd, "DEBUG OFF") == 0) {
         setDriftLog(false);
-    } else if (strcasecmp(cmd, "SERIAL ON") == 0) {
-        setSerialPrintEnabled(true);
-    } else if (strcasecmp(cmd, "SERIAL OFF") == 0) {
-        setSerialPrintEnabled(false);
-    } else if (strncasecmp(cmd, "SERIAL DIV ", 11) == 0) {
-        int div = atoi(cmd + 11);
-        if (div < 1) div = 1;
-        setSerialPrintDivider((uint32_t)div);
     } else if (dispatchTuningCommand(cmd)) {
-        // handled (MODE/KP/VAR/EMA/LIMIT/LIMITCLEAR/SAVE)
+        // handled (MODE/KP/VAR/EMA/LIMIT/LIMITCLEAR/SAVE/GYROCAL/SERIAL …)
     } else {
         Serial.printf("[CMD] Unknown command: '%s'. Type HELP.\n", cmd);
     }
@@ -158,6 +163,7 @@ void SerialCommand::printHelp() {
     Serial.println("  EMA <v>     Output smoothing alpha 0.01-1 (live)");
     Serial.println("  LIMIT <e>   Capture tilt edge: FRONT|BACK|LEFT|RIGHT");
     Serial.println("  LIMITCLEAR  Forget captured tilt limits");
+    Serial.println("  GYROCAL     Recalibrate gyro bias (board still, ~1 s)");
     Serial.println("  SAVE        Persist tuning + tilt limits to NVM");
     Serial.println("  HELP        Show this help");
 }
