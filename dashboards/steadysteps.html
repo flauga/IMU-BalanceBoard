@@ -1764,14 +1764,19 @@ function computeSwayEllipse() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Local persistence — session history, leaderboard, preferences. This is a
-// plain GitHub-Pages page, so localStorage is the right tool: nothing leaves
-// the device, and gym tablets keep their own history per browser profile.
+// Local persistence — preferences and player profiles only. Individual game
+// session scores are NO LONGER stored locally: Airtable is the sole store for
+// them (beginner-level finishes → cloudRecordSession; per-level bests + unlocks
+// → cloudFetchBests). Per-player session history is kept in memory for the
+// current page session only (so "vs last time", rank, streak, sparkline still
+// work) and is intentionally NOT persisted — it resets on reload.
 // ───────────────────────────────────────────────────────────────────────────
-const HISTORY_KEY = 'bb_game_history_v1';   // per-player: HISTORY_KEY + '::' + name
 const PREFS_KEY   = 'bb_prefs_v1';          // { sound, mode } — shared across players
-const LB_KEY      = 'bb_leaderboard_v1';    // arcade top-10 [{i,score,s,t}] — shared
 const PLAYERS_KEY = 'bb_players_v1';        // { current, names[] }
+
+// In-memory session history, keyed by player name. Never written to
+// localStorage — lost on reload by design (Airtable is the persistent store).
+const sessionHistory = Object.create(null);
 
 // ── Player profiles + Guest ────────────────────────────────────────────────
 // Each named player gets their own history (→ own rank, streak, sparkline,
@@ -1792,7 +1797,6 @@ function savePlayersStore() {
   try { localStorage.setItem(PLAYERS_KEY, JSON.stringify(players)); } catch {}
 }
 function isGuest()    { return players.current === GUEST; }
-function historyKey() { return HISTORY_KEY + '::' + players.current; }
 
 function setPlayer(name) {
   if (recording || $('g-mode').disabled) return;   // not mid-game
@@ -1845,15 +1849,15 @@ document.addEventListener('click', hidePlayerMenu);
 
 function loadHistory() {
   if (isGuest()) return [];
-  try { return JSON.parse(localStorage.getItem(historyKey())) || []; }
-  catch { return []; }
+  return sessionHistory[players.current] || [];   // in-memory only, not persisted
 }
 function saveHistoryEntry(entry) {
   if (isGuest()) { updateHistorySummary(); return; }   // Guest leaves no trace
-  const h = loadHistory();
+  const h = sessionHistory[players.current] || (sessionHistory[players.current] = []);
   h.push(entry);
   while (h.length > 30) h.shift();
-  try { localStorage.setItem(historyKey(), JSON.stringify(h)); } catch {}
+  // Not written to localStorage: session scores live only in Airtable. This
+  // in-memory copy just keeps the on-screen summary/rank/streak live this session.
   updateHistorySummary();
 }
 function loadPrefs() {
@@ -1950,18 +1954,49 @@ function cloudRecordSession(level, score) {
   }).then(r => { if (r.ok) cloudFetchLB(); }).catch(() => {});
 }
 
-function loadLocalLB() {
-  try { return JSON.parse(localStorage.getItem(LB_KEY)) || []; }
-  catch { return []; }
+// Leaderboard entries recorded THIS page session, in memory only. Not persisted
+// to localStorage — beginner-level scores are pushed to Airtable and read back
+// via cloudFetchLB(); this list just keeps a score visible on the board between
+// the moment it's earned and the cloud round-trip (and covers arcade modes).
+let localLB = [];
+function loadLocalLB() { return localLB; }
+
+// ── Local HIGHSCORE cache (bests only — NOT session history) ────────────────
+// So the top score for each game shows INSTANTLY on load instead of waiting for
+// the Airtable round-trip. We persist exactly one entry per bucket (game mode ×
+// stance, or a daily board): the single highest score seen on this device. This
+// is not session storage — it's a per-game best cache, the arcade counterpart
+// to bg_best for the beginner levels. Cloud stays the source of truth; loadLB()
+// merges these in and the cloud's higher/newer entries win on the next fetch.
+const LB_BEST_KEY = 'ss_lb_best_v1';        // { [bucket]: entry } — one best per game
+function lbLoadBests() {
+  try { const o = JSON.parse(localStorage.getItem(LB_BEST_KEY)); return (o && typeof o === 'object') ? o : {}; }
+  catch { return {}; }
 }
-// Merged view: cloud entries + locally-recorded ones (deduped — a score this
-// device pushed exists in both with identical fields), top-10 per mode.
+function lbSaveBests(o) { try { localStorage.setItem(LB_BEST_KEY, JSON.stringify(o)); } catch {} }
+// Record a best if this entry beats the cached best for its bucket. Prunes daily
+// buckets from days other than today so the cache doesn't grow without bound.
+function lbCacheBest(entry) {
+  const o = lbLoadBests();
+  const k = lbBucket(entry);
+  if (!o[k] || entry.score > o[k].score) o[k] = entry;
+  for (const key of Object.keys(o)) {
+    if (key.startsWith('d|') && key !== `d|${todayKey()}`) delete o[key];
+  }
+  lbSaveBests(o);
+}
+// The cached bests as a flat list, shaped like leaderboard entries.
+function lbCachedBestList() { return Object.values(lbLoadBests()); }
+
+// Merged view: cloud entries + this session's local entries + the persisted
+// per-game best cache, deduped, top-10 per bucket. The best cache is what makes
+// each game's top score appear before the cloud responds; cloud/local entries
+// with a higher or equal score dedup against it via the composite key.
 function loadLB() {
-  const local = loadLocalLB();
-  if (!cloudLB.length) return local;
+  const sources = [...cloudLB, ...loadLocalLB(), ...lbCachedBestList()];
   const seen = new Set();
   const all = [];
-  for (const e of [...cloudLB, ...local]) {
+  for (const e of sources) {
     const k = `${e.i}|${e.score}|${e.t}|${e.m || ''}`;
     if (seen.has(k)) continue;
     seen.add(k); all.push(e);
@@ -1996,7 +2031,7 @@ function addLB(initials, score, smallest, modeKey) {
   const entry = { i: initials, score, s: smallest, t: Date.now(), m,
                   st: gameState.stance || stance };
   if (gameState.daily) entry.d = gameState.daily;
-  let b = loadLocalLB();                   // local store keeps only local-trimmed entries
+  let b = loadLocalLB();                   // in-memory session list (not persisted)
   b.push(entry);
   b.sort((a, b2) => b2.score - a.score);
   const counts = {};                       // keep top-10 per bucket
@@ -2005,9 +2040,11 @@ function addLB(initials, score, smallest, modeKey) {
     counts[k] = (counts[k] || 0) + 1;
     return counts[k] <= 10;
   });
-  try { localStorage.setItem(LB_KEY, JSON.stringify(b)); } catch {}
-  // The cloud copy of a beginner score is written as a Gameplay Session at
-  // level finish (see cloudRecordSession); arcade scores stay local-only.
+  localLB = b;                             // kept in memory only — Airtable is the store
+  // Persist ONLY the per-game best (not the session) so this game's top score
+  // shows instantly on next load, ahead of the Airtable fetch. The full session
+  // score itself goes to the cloud (cloudRecordSession at level finish).
+  lbCacheBest(entry);
   refreshIdleInfo();
 }
 
@@ -2044,17 +2081,17 @@ function updateHistorySummary() {
 }
 $('btn-clear-hist').addEventListener('click', () => {
   if (isGuest()) { log('Guest has no saved history'); return; }
-  try { localStorage.removeItem(historyKey()); } catch {}
+  delete sessionHistory[players.current];   // in-memory only; nothing persisted to clear
   updateHistorySummary();
-  log(`Game history cleared for ${players.current}`);
+  log(`Game history cleared for ${players.current} (this session)`);
 });
 $('btn-clear-lb').addEventListener('click', () => {
-  // Clears only this device's local leaderboard. Cloud sessions live in
-  // Airtable and are managed there, not wiped from the dashboard.
-  if (!confirm('Clear this device’s local leaderboard? (Cloud scores in Airtable are kept.)')) return;
-  try { localStorage.removeItem(LB_KEY); } catch {}
+  // Clears only this session's in-memory leaderboard entries. Cloud sessions
+  // live in Airtable and are managed there, not wiped from the dashboard.
+  if (!confirm('Clear this session’s local leaderboard? (Cloud scores in Airtable are kept.)')) return;
+  localLB = [];
   refreshIdleInfo();
-  log('Local leaderboard cleared');
+  log('Local leaderboard cleared (this session)');
 });
 
 // Streak: consecutive calendar days (ending today or yesterday) with ≥1
@@ -3572,20 +3609,24 @@ setInterval(() => {
 // mode cards, history + idle attract info.
 // ───────────────────────────────────────────────────────────────────────────
 (function boot() {
-  // Players: load the store, or migrate a legacy single-history install into
-  // a 'PLAYER 1' profile so nobody's progress is lost by this update.
+  // One-time cleanup: session scores are no longer stored locally (Airtable is
+  // the sole store), so purge any history/leaderboard keys left by older
+  // versions from this browser profile — including per-player suffixed ones.
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && (k === 'bb_game_history_v1' || k.startsWith('bb_game_history_v1::') ||
+                k === 'bb_leaderboard_v1')) {
+        localStorage.removeItem(k);
+      }
+    }
+  } catch {}
+  // Players: load the store (or default to 'PLAYER 1').
   const stored = loadPlayersStore();
   if (stored) {
     players = stored;
   } else {
     players = { current: 'PLAYER 1', names: ['PLAYER 1'] };
-    try {
-      const legacy = localStorage.getItem(HISTORY_KEY);
-      if (legacy) {
-        localStorage.setItem(HISTORY_KEY + '::PLAYER 1', legacy);
-        localStorage.removeItem(HISTORY_KEY);
-      }
-    } catch {}
     savePlayersStore();
   }
   if (!isGuest() && !players.names.includes(players.current)) {
